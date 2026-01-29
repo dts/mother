@@ -1,5 +1,7 @@
 # mother
 
+*"Mother, may I execute `rm -rf /`?"*
+
 A permission evaluation system for Claude Code hooks. Analyzes tool requests through a multi-stage pipeline to automatically allow, deny, or flag operations for manual review.
 
 ## How it works
