@@ -17,6 +17,8 @@
 - Running tests
 - Git operations that don't push (status, diff, add, commit, log)
 - Read-only kubectl commands (get, describe, logs, top, explain, api-resources, config view)
+- gh CLI commands (pr create, pr view, pr list, pr checkout, pr merge, issue create, issue view, issue list, repo view, api)
+- gh pr creation and updates are always allowed
 
 ## Requires Review
 - Any network requests (even GET)
@@ -24,3 +26,4 @@
 - Executing shell commands with user-provided arguments
 - Creating new executable files
 - kubectl commands that modify state (apply, delete, create, patch, edit, scale, rollout, exec)
+- Destructive gh commands (repo delete, pr close, issue close, release delete)
