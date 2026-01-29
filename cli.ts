@@ -206,19 +206,22 @@ function buildHookOutput(
 ) {
   // PermissionRequest uses different format than PreToolUse
   if (hookEventName === "PermissionRequest") {
-    const behaviorMap = { allow: "allow", deny: "deny", ask: "deny" } as const;
+    // "ask" means pass through to Claude Code's normal permission UI
+    if (decision === "ask") {
+      return {};
+    }
     return {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
         decision: {
-          behavior: behaviorMap[decision],
+          behavior: decision, // "allow" or "deny"
           message: reason,
         },
       },
     };
   }
 
-  // PreToolUse format
+  // PreToolUse format - "ask" is a valid value
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
