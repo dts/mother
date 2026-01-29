@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '$TOOL_INPUT' | ~/.bin/mother '$TOOL_NAME'"
+          }
+        ]
+      }
+    ]
+  }
+}
