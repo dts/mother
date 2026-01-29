@@ -261,8 +261,17 @@ async function main() {
   // Stage 1: Triage for prompt injection
   const triage = await triageStage(inputText);
 
-  // If high prompt injection likelihood, deny immediately
+  // If high prompt injection likelihood, flag for review with warning
   if (triage.promptInjectionScore > 70 || triage.regexFlags.length > 0) {
+    const warnings = [];
+    if (triage.regexFlags.length > 0) {
+      warnings.push(`Suspicious patterns: ${triage.regexFlags.join(", ")}`);
+    }
+    if (triage.promptInjectionScore > 70) {
+      warnings.push(`Injection score: ${triage.promptInjectionScore}/100`);
+    }
+    warnings.push(triage.reasoning);
+
     const result: AnalysisResult = {
       timestamp: new Date().toISOString(),
       args,
@@ -270,23 +279,23 @@ async function main() {
       cwd,
       triage,
       explanation: {
-        summary: "Blocked at triage - potential prompt injection",
+        summary: "Flagged at triage - potential prompt injection",
         affectedPaths: [],
         relativeToProject: "N/A",
       },
       preferenceCheck: {
-        violatedRules: ["Potential prompt injection detected"],
+        violatedRules: [],
         matchedAllowedActions: [],
-        requiresReview: [],
-        decision: "deny",
-        reasoning: "Request blocked due to prompt injection indicators",
+        requiresReview: ["Potential prompt injection detected"],
+        decision: "review",
+        reasoning: warnings.join(" | "),
       },
     };
 
     const hookOutput = buildHookOutput(
       hookEventName,
-      "deny",
-      "Request blocked due to prompt injection indicators"
+      "ask",
+      `⚠️ Potential prompt injection: ${warnings.join(" | ")}`
     );
 
     const logPath = `${import.meta.dir}/log.jsonl`;
