@@ -243,13 +243,17 @@ async function main() {
     // No stdin available
   }
 
-  // Try to parse stdin as JSON to get hook_event_name
+  // Try to parse stdin as JSON to get hook context
   let hookEventName = "PreToolUse";
+  let permissionMode = "default";
+  let toolName = "";
   try {
     const parsed = JSON.parse(stdinContent);
     hookEventName = parsed.hook_event_name || "PreToolUse";
+    permissionMode = parsed.permission_mode || "default";
+    toolName = parsed.tool_name || "";
   } catch {
-    // Not JSON, use default
+    // Not JSON, use defaults
   }
 
   const inputText = `${args.join(" ")} ${stdinContent}`.trim();
@@ -322,14 +326,20 @@ async function main() {
   };
 
   // Map decision to permission response
-  const permissionMap = {
-    allow: "allow",
-    deny: "deny",
-    review: "ask",
-  } as const;
+  let finalDecision: "allow" | "deny" | "ask" = {
+    allow: "allow" as const,
+    deny: "deny" as const,
+    review: "ask" as const,
+  }[preferenceCheck.decision];
+
+  // In default permission mode, don't auto-allow edits - let user confirm
+  const isEditTool = ["Edit", "Write", "NotebookEdit"].includes(toolName);
+  if (finalDecision === "allow" && isEditTool && permissionMode === "default") {
+    finalDecision = "ask";
+  }
 
   const reason = `${explanation.summary} | ${explanation.relativeToProject} | ${preferenceCheck.reasoning}`;
-  const hookOutput = buildHookOutput(hookEventName, permissionMap[preferenceCheck.decision], reason);
+  const hookOutput = buildHookOutput(hookEventName, finalDecision, reason);
 
   // Append to log (including the exact hook output)
   const logPath = `${import.meta.dir}/log.jsonl`;
