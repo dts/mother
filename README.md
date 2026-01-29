@@ -2,7 +2,7 @@
 
 *"Mother, may I execute `rm -rf /`?"*
 
-A permission evaluation system for Claude Code hooks. Analyzes tool requests through a multi-stage pipeline to automatically allow, deny, or flag operations for manual review.
+A permission evaluation system for Claude Code hooks. Analyzes tool requests through a multi-stage pipeline to automatically allow, deny, or flag operations for manual review. If you're watching in claude code, you can approve/deny before it answers (i.e. it's async), but if you're heads down somewhere else, it'll keep a lot of things going without your intervention.
 
 ## How it works
 
