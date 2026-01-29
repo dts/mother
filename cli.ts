@@ -47,12 +47,12 @@ const SUSPICIOUS_PATTERNS = [
   { pattern: /<\/?assistant>/i, flag: "xml-tag-injection" },
   { pattern: /<\/?human>/i, flag: "xml-tag-injection" },
   { pattern: /pretend\s+(to\s+be|you('re| are))/i, flag: "pretend-prompt" },
-  { pattern: /disregard|forget\s+(everything|all)/i, flag: "disregard-prompt" },
+  { pattern: /(disregard|forget)\s+(everything|all|previous|above)/i, flag: "disregard-prompt" },
   { pattern: /developer\s+mode/i, flag: "developer-mode" },
   { pattern: /\bDAN\b.*\b(do\s+anything|jailbreak)/i, flag: "jailbreak" },
   { pattern: /output\s+(your|the)\s+(system\s+)?prompt/i, flag: "prompt-leak" },
   { pattern: /---\s*(END|BEGIN)\s+(SYSTEM|USER)/i, flag: "fake-delimiter" },
-  { pattern: /override|bypass\s+(safety|security|restrictions?)/i, flag: "bypass-attempt" },
+  { pattern: /(override|bypass)\s+(safety|security|restrictions?)/i, flag: "bypass-attempt" },
 ];
 
 async function triageStage(input: string): Promise<AnalysisResult["triage"]> {
