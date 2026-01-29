@@ -19,9 +19,10 @@
 - Read-only kubectl commands (get, describe, logs, top, explain, api-resources, config view)
 - gh CLI commands (pr create, pr view, pr list, pr checkout, pr merge, issue create, issue view, issue list, repo view, api)
 - gh pr creation and updates are always allowed
+- npm/bun/yarn package info commands (npm view, npm info, npm search, bun pm, yarn info)
 
 ## Requires Review
-- Any network requests (even GET)
+- Network requests not covered by allowed actions above
 - File operations outside the current directory
 - Executing shell commands with user-provided arguments
 - Creating new executable files
