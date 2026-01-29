@@ -225,7 +225,6 @@ function buildHookOutput(
 
 async function main() {
   const args = process.argv.slice(2);
-  const cwd = process.cwd();
 
   // Read stdin
   let stdinContent = "";
@@ -247,11 +246,13 @@ async function main() {
   let hookEventName = "PreToolUse";
   let permissionMode = "default";
   let toolName = "";
+  let cwd = process.cwd();
   try {
     const parsed = JSON.parse(stdinContent);
     hookEventName = parsed.hook_event_name || "PreToolUse";
     permissionMode = parsed.permission_mode || "default";
     toolName = parsed.tool_name || "";
+    cwd = parsed.cwd || cwd; // Use project cwd from hook, not mother's cwd
   } catch {
     // Not JSON, use defaults
   }
