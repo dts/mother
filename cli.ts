@@ -35,24 +35,16 @@ interface AnalysisResult {
   };
 }
 
-// Regex patterns for suspicious content
+// Regex patterns for structural prompt injection sequences (not words)
+// These catch character patterns that are almost never legitimate in code
 const SUSPICIOUS_PATTERNS = [
-  { pattern: /ignore\s+(previous|all|above)\s+(instructions?|prompts?)/i, flag: "ignore-instructions" },
-  { pattern: /you\s+are\s+(now|actually)/i, flag: "role-override" },
-  { pattern: /system\s*:\s*/i, flag: "fake-system-prompt" },
   { pattern: /\]\]\s*\[\[/i, flag: "bracket-injection" },
-  { pattern: /<\/?system>/i, flag: "xml-tag-injection" },
-  { pattern: /<\/?system-prompt>/i, flag: "xml-tag-injection" },
-  { pattern: /<\/?instructions?>/i, flag: "xml-tag-injection" },
-  { pattern: /<\/?assistant>/i, flag: "xml-tag-injection" },
-  { pattern: /<\/?human>/i, flag: "xml-tag-injection" },
-  { pattern: /pretend\s+(to\s+be|you('re| are))/i, flag: "pretend-prompt" },
-  { pattern: /(disregard|forget)\s+(everything|all|previous|above)/i, flag: "disregard-prompt" },
-  { pattern: /developer\s+mode/i, flag: "developer-mode" },
-  { pattern: /\bDAN\b.*\b(do\s+anything|jailbreak)/i, flag: "jailbreak" },
-  { pattern: /output\s+(your|the)\s+(system\s+)?prompt/i, flag: "prompt-leak" },
-  { pattern: /---\s*(END|BEGIN)\s+(SYSTEM|USER)/i, flag: "fake-delimiter" },
-  { pattern: /(override|bypass)\s+(safety|security|restrictions?)/i, flag: "bypass-attempt" },
+  { pattern: /<\/?system>/i, flag: "xml-system-tag" },
+  { pattern: /<\/?system-prompt>/i, flag: "xml-system-tag" },
+  { pattern: /<\/?assistant>/i, flag: "xml-role-tag" },
+  { pattern: /<\/?human>/i, flag: "xml-role-tag" },
+  { pattern: /<\/?user>/i, flag: "xml-role-tag" },
+  { pattern: /---\s*(END|BEGIN)\s+(SYSTEM|USER|ASSISTANT)/i, flag: "fake-delimiter" },
 ];
 
 async function triageStage(input: string): Promise<AnalysisResult["triage"]> {
