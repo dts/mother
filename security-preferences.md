@@ -16,9 +16,11 @@
 - Installing project-local dependencies
 - Running tests
 - Git operations that don't push (status, diff, add, commit, log)
+- Read-only kubectl commands (get, describe, logs, top, explain, api-resources, config view)
 
 ## Requires Review
 - Any network requests (even GET)
 - File operations outside the current directory
 - Executing shell commands with user-provided arguments
 - Creating new executable files
+- kubectl commands that modify state (apply, delete, create, patch, edit, scale, rollout, exec)
