@@ -6,7 +6,7 @@ import { readFile } from "fs/promises";
 config({ path: `${import.meta.dir}/.env`, quiet: true });
 
 const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const haiku = anthropic("claude-3-5-haiku-latest");
+const haiku = anthropic("claude-haiku-4-5-20251001");
 
 // ============================================================================
 // TRIAGE STAGE EVAL CASES
