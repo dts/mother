@@ -21,8 +21,13 @@
 - Supabase read-only remote commands (supabase projects list, functions list, secrets list, db remote commit, db diff --linked, orgs list, branches list)
 - iOS development tools (xcodebuild, xcrun, xcode-select, simctl, instruments, codesign, altool, notarytool)
 - Android development tools (adb, emulator, avdmanager, sdkmanager, gradle, gradlew, bundletool, apksigner)
+- Reading/writing /tmp and /private/tmp directories (temporary files)
+- Reading ~/.claude/projects/<current-project>/ directory (Claude's session data for the active project only, not other projects)
+- Reading and writing ~/.maestro directory (Maestro mobile testing config/flows)
+- Running Maestro commands with Java/environment setup (mobile UI testing)
 
 ## Requires Review (ask user first)
+- Editing Claude settings (~/.claude/settings.json) - ask, don't block
 - Pushing to remote (git push, curl POST, fetch POST, etc.)
 - Deleting files outside the current working directory
 - Modifying system files (/etc, /usr, ~/.bashrc, ~/.zshrc, etc.)

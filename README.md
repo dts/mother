@@ -52,6 +52,10 @@ echo 'exec bun /path/to/mother/cli.ts "$@"' >> ~/.bin/mother
 chmod +x ~/.bin/mother
 
 # Ensure ~/.bin is in your PATH
+
+# Copy the security preferences to ~/.claude
+mkdir -p ~/.claude
+cp security-preferences.example.md ~/.claude/security-preferences.md
 ```
 
 ## Claude Code Integration
@@ -89,7 +93,15 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
 
 ## Security Preferences
 
-Edit `security-preferences.md` to customize rules. Default policy:
+Mother looks for security preferences in this order:
+
+1. **Repo-specific**: `.claude/security-preferences.md` (in your project's git root)
+2. **Global**: `~/.claude/security-preferences.md`
+3. **Permissive fallback**: If neither exists, allows project-local operations and reviews everything else
+
+This lets you have strict global defaults while relaxing rules for specific projects (e.g., allowing `git push` in a trusted repo).
+
+Edit `~/.claude/security-preferences.md` for global rules, or create `.claude/security-preferences.md` in a repo for project-specific overrides. Default policy:
 
 **Forbidden:**
 - Pushing to web (POST requests, git push)
@@ -161,6 +173,6 @@ Test cases cover:
 
 - `cli.ts` - Main analysis pipeline
 - `eval.ts` - LLM-as-judge evaluation suite
-- `security-preferences.md` - Customizable security rules
+- `security-preferences.example.md` - Example security rules (copy to `~/.claude/security-preferences.md`)
 - `log.jsonl` - Request log (gitignored)
 - `.env` - API key (gitignored)

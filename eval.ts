@@ -857,7 +857,14 @@ async function runPreferenceEval(testCase: PreferenceCase): Promise<{
   reasoning: string;
   judgment: string;
 }> {
-  const preferences = await readFile(`${import.meta.dir}/security-preferences.md`, "utf-8");
+  // For eval, look in global location or fallback to local example
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+  let preferences: string;
+  try {
+    preferences = await readFile(`${homeDir}/.claude/security-preferences.md`, "utf-8");
+  } catch {
+    preferences = await readFile(`${import.meta.dir}/security-preferences.example.md`, "utf-8");
+  }
 
   const { text } = await generateText({
     model: haiku,

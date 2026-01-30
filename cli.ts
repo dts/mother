@@ -252,16 +252,43 @@ async function main() {
     hookEventName = parsed.hook_event_name || "PreToolUse";
     permissionMode = parsed.permission_mode || "default";
     toolName = parsed.tool_name || "";
-    cwd = parsed.cwd || cwd; // Use project cwd from hook, not mother's cwd
+    cwd = parsed.cwd || cwd;
   } catch {
     // Not JSON, use defaults
   }
 
+  // Find git root to use as project boundary (not just cwd which might be a subdirectory)
+  try {
+    const result = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd });
+    if (result.exitCode === 0) {
+      cwd = result.stdout.toString().trim();
+    }
+  } catch {
+    // Not a git repo, use cwd as-is
+  }
+
   const inputText = `${args.join(" ")} ${stdinContent}`.trim();
 
-  // Load security preferences
-  const preferencesPath = `${import.meta.dir}/security-preferences.md`;
-  const preferences = await readFile(preferencesPath, "utf-8");
+  // Load security preferences (repo-specific first, then global)
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+  const repoPrefsPath = `${cwd}/.claude/security-preferences.md`;
+  const globalPrefsPath = `${homeDir}/.claude/security-preferences.md`;
+
+  let preferences: string;
+  let prefsSource: string;
+  try {
+    preferences = await readFile(repoPrefsPath, "utf-8");
+    prefsSource = repoPrefsPath;
+  } catch {
+    try {
+      preferences = await readFile(globalPrefsPath, "utf-8");
+      prefsSource = globalPrefsPath;
+    } catch {
+      // No preferences found - use permissive defaults
+      preferences = `# Security Preferences\n\n## Allowed Actions\n- All actions within the project directory\n\n## Requires Review\n- Everything else`;
+      prefsSource = "default";
+    }
+  }
 
   // Stage 1: Triage for prompt injection
   const triage = await triageStage(inputText);
