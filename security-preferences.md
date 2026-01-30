@@ -1,12 +1,7 @@
 # Security Preferences
 
 ## Forbidden Actions
-- No pushing information to the web (curl POST, fetch POST, git push, etc.)
-- No deleting files outside the current working directory
-- No modifying system files (/etc, /usr, ~/.bashrc, ~/.zshrc, etc.)
-- No accessing or exfiltrating environment variables containing secrets
-- No running commands with sudo or elevated privileges
-- No modifying SSH keys or credentials
+- None - prefer asking over blocking
 
 ## Allowed Actions
 - Reading files within the project directory
@@ -22,12 +17,23 @@
 - npm/bun/yarn package info commands (npm view, npm info, npm search, bun pm, yarn info)
 - Docker commands for local development (docker run, docker build, docker compose)
 - Installing global packages INSIDE local Docker containers (isolated environments are safe)
+- Supabase local commands (supabase init, start, stop, status, db reset, db push, db diff, functions serve, gen types, migration)
+- Supabase read-only remote commands (supabase projects list, functions list, secrets list, db remote commit, db diff --linked, orgs list, branches list)
+- iOS development tools (xcodebuild, xcrun, xcode-select, simctl, instruments, codesign, altool, notarytool)
+- Android development tools (adb, emulator, avdmanager, sdkmanager, gradle, gradlew, bundletool, apksigner)
 
-## Requires Review
+## Requires Review (ask user first)
+- Pushing to remote (git push, curl POST, fetch POST, etc.)
+- Deleting files outside the current working directory
+- Modifying system files (/etc, /usr, ~/.bashrc, ~/.zshrc, etc.)
+- Accessing environment variables that may contain secrets
+- Running sudo commands
+- Modifying SSH keys or credentials
 - Network requests not covered by allowed actions above
 - File operations outside the current directory
 - Executing shell commands with user-provided arguments
 - Creating new executable files
 - kubectl commands that modify state (apply, delete, create, patch, edit, scale, rollout, exec)
 - Destructive gh commands (repo delete, pr close, issue close, release delete)
-- Installing global packages on host machine (npm install -g, brew install, etc.) - prefer Docker instead
+- Installing system dependencies (npm install -g, brew install, apt-get install, pip install --user, etc.)
+- Supabase remote write commands (supabase db push --linked, functions deploy, secrets set, link, projects create, branches create/delete)
