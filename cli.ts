@@ -288,6 +288,21 @@ async function main() {
     return;
   }
 
+  // Deny xargs in Bash commands in acceptEdits mode — use subagents instead
+  if (toolName === "Bash" && permissionMode === "acceptEdits") {
+    const commandMatch = stdinContent.match(/"command"\s*:\s*"([^"]+)"/);
+    const command = commandMatch?.[1] || "";
+    if (command.includes("xargs")) {
+      const hookOutput = buildHookOutput(
+        hookEventName,
+        "deny",
+        "xargs pipelines are not allowed. Use the Task tool with subagents to parallelize work instead."
+      );
+      console.log(JSON.stringify(hookOutput));
+      return;
+    }
+  }
+
   const inputText = `${args.join(" ")} ${stdinContent}`.trim();
 
   // Load security preferences (repo-specific first, then global)
