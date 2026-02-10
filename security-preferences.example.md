@@ -12,7 +12,7 @@
 - Git operations that don't push (status, diff, add, commit, log)
 - Read-only kubectl commands (get, describe, logs, top, explain, api-resources, config view)
 - Production Kubernetes is READ-ONLY - no apply, delete, exec, or modifications
-- gh CLI commands (pr create, pr view, pr list, pr checkout, pr merge, issue create, issue view, issue list, repo view, api)
+- gh CLI commands (pr create, pr view, pr list, pr checkout, pr merge, issue create, issue view, issue list, repo view, api, run view, run list, run watch)
 - gh pr creation and updates are always allowed
 - npm/bun/yarn package info commands (npm view, npm info, npm search, bun pm, yarn info)
 - Docker commands for local development (docker run, docker build, docker compose)
@@ -36,7 +36,7 @@
 - Modifying SSH keys or credentials
 - Network requests not covered by allowed actions above
 - File operations outside the current directory
-- Executing shell commands with user-provided arguments
+- Shell commands that are destructive (rm -rf, mkfs, dd) or could exfiltrate data (curl/wget POST with file contents, piping secrets to external services)
 - Creating new executable files
 - kubectl commands that modify state (apply, delete, create, patch, edit, scale, rollout, exec)
 - Destructive gh commands (repo delete, pr close, issue close, release delete)

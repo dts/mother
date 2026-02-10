@@ -244,13 +244,21 @@ async function main() {
 
   // Try to parse stdin as JSON to get hook context
   let hookEventName = "PreToolUse";
-  let permissionMode = "default";
+  let permissionMode: "plan" | "acceptEdits" | "default" = "default";
   let toolName = "";
   let cwd = process.cwd();
   try {
     const parsed = JSON.parse(stdinContent);
     hookEventName = parsed.hook_event_name || "PreToolUse";
-    permissionMode = parsed.permission_mode || "default";
+    // Normalize permission mode to one of: plan, acceptEdits, default
+    const rawMode = parsed.permission_mode || "default";
+    if (rawMode === "plan" || rawMode === "planMode") {
+      permissionMode = "plan";
+    } else if (rawMode === "acceptEdits" || rawMode === "acceptAllEdits") {
+      permissionMode = "acceptEdits";
+    } else {
+      permissionMode = "default"; // normal mode
+    }
     toolName = parsed.tool_name || "";
     cwd = parsed.cwd || cwd;
   } catch {
@@ -265,6 +273,19 @@ async function main() {
     }
   } catch {
     // Not a git repo, use cwd as-is
+  }
+
+  // Define tool categories for mode-based decisions
+  const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoRead"];
+  const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+  const isReadOnlyTool = READ_ONLY_TOOLS.includes(toolName);
+  const isWriteTool = WRITE_TOOLS.includes(toolName);
+
+  // Tools Mother should never evaluate — pass through to Claude Code's native handling
+  const PASSTHROUGH_TOOLS = ["AskUserQuestion"];
+  if (PASSTHROUGH_TOOLS.includes(toolName)) {
+    console.log(JSON.stringify({}));
+    return;
   }
 
   const inputText = `${args.join(" ")} ${stdinContent}`.trim();
@@ -353,17 +374,91 @@ async function main() {
     preferenceCheck,
   };
 
-  // Map decision to permission response
+  // Map decision to permission response based on mode
   let finalDecision: "allow" | "deny" | "ask" = {
     allow: "allow" as const,
     deny: "deny" as const,
     review: "ask" as const,
   }[preferenceCheck.decision];
 
-  // In default permission mode, don't auto-allow edits - let user confirm
-  const isEditTool = ["Edit", "Write", "NotebookEdit"].includes(toolName);
-  if (finalDecision === "allow" && isEditTool && permissionMode === "default") {
-    finalDecision = "ask";
+  // Apply mode-specific logic
+  if (permissionMode === "plan") {
+    // Plan mode: Allow read operations, only write planning documents, ask for everything else
+    if (toolName === "ExitPlanMode") {
+      // Never allow exiting plan mode
+      finalDecision = "deny";
+    } else if (isReadOnlyTool) {
+      // Read operations are always allowed in plan mode
+      finalDecision = "allow";
+    } else if (isWriteTool) {
+      // Check if writing to a planning document
+      const isPlanningDoc = explanation.affectedPaths.some(
+        (p) =>
+          p.toLowerCase().includes("plan") ||
+          p.endsWith(".plan.md") ||
+          p.endsWith(".plan") ||
+          p.includes("/plans/") ||
+          p.includes("/planning/")
+      );
+      if (isPlanningDoc) {
+        finalDecision = "allow";
+      } else {
+        // Not a planning document - ask before writing
+        finalDecision = "ask";
+      }
+    } else {
+      // Other tools in plan mode: be conservative, ask unless explicitly allowed
+      if (finalDecision === "allow") {
+        // Trust the policy for non-write tools
+      } else {
+        finalDecision = "ask";
+      }
+    }
+  } else if (permissionMode === "acceptEdits") {
+    // Accept all edits mode: Prefer allow/deny, minimize ask
+    // Only block clearly malicious or system-damaging operations
+    if (preferenceCheck.violatedRules.length > 0) {
+      // Check if the violation is truly dangerous (system-level damage)
+      const dangerousViolations = preferenceCheck.violatedRules.some(
+        (rule) =>
+          rule.toLowerCase().includes("system") ||
+          rule.toLowerCase().includes("sudo") ||
+          rule.toLowerCase().includes("credential") ||
+          rule.toLowerCase().includes("ssh key") ||
+          rule.toLowerCase().includes("/etc") ||
+          rule.toLowerCase().includes("/usr")
+      );
+      if (dangerousViolations) {
+        finalDecision = "deny";
+      } else {
+        // Non-dangerous violation in acceptEdits mode: allow it
+        finalDecision = "allow";
+      }
+    } else if (finalDecision === "ask") {
+      // In acceptEdits mode, convert most "ask" to "allow" unless it's suspicious
+      const requiresReviewForDanger = preferenceCheck.requiresReview.some(
+        (r) =>
+          r.toLowerCase().includes("system") ||
+          r.toLowerCase().includes("sudo") ||
+          r.toLowerCase().includes("credential") ||
+          r.toLowerCase().includes("delete") ||
+          r.toLowerCase().includes("destructive")
+      );
+      if (!requiresReviewForDanger) {
+        finalDecision = "allow";
+      }
+    }
+    // Otherwise trust the policy decision (allow/deny)
+  } else {
+    // Normal/default mode: More conservative, ask more often
+    // Edit tools need user confirmation even if policy says allow
+    if (finalDecision === "allow" && isWriteTool) {
+      finalDecision = "ask";
+    }
+    // If something requires review but isn't core to the operation, ask
+    if (preferenceCheck.requiresReview.length > 0 && finalDecision !== "deny") {
+      finalDecision = "ask";
+    }
   }
 
   const reason = `${explanation.summary} | ${explanation.relativeToProject} | ${preferenceCheck.reasoning}`;
