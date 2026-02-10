@@ -288,16 +288,25 @@ async function main() {
     return;
   }
 
-  // Deny xargs in Bash commands in acceptEdits mode — use subagents instead
-  if (toolName === "Bash" && permissionMode === "acceptEdits") {
+  // Early deterministic checks for Bash commands (before LLM pipeline)
+  if (toolName === "Bash") {
     const commandMatch = stdinContent.match(/"command"\s*:\s*"([^"]+)"/);
     const command = commandMatch?.[1] || "";
-    if (command.includes("xargs")) {
+
+    // Deny xargs in acceptEdits mode — use subagents instead
+    if (permissionMode === "acceptEdits" && command.includes("xargs")) {
       const hookOutput = buildHookOutput(
         hookEventName,
         "deny",
         "xargs pipelines are not allowed. Use the Task tool with subagents to parallelize work instead."
       );
+      console.log(JSON.stringify(hookOutput));
+      return;
+    }
+
+    // Allow read-only gh api calls (GET is the default; block POST/PUT/DELETE/PATCH)
+    if (/\bgh\s+api\b/.test(command) && !/--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i.test(command)) {
+      const hookOutput = buildHookOutput(hookEventName, "allow", "Read-only gh api call");
       console.log(JSON.stringify(hookOutput));
       return;
     }
@@ -476,7 +485,19 @@ async function main() {
     }
   }
 
-  const reason = `${explanation.summary} | ${explanation.relativeToProject} | ${preferenceCheck.reasoning}`;
+  // Build a descriptive reason so the user can understand why
+  const reasonParts = [explanation.summary];
+  if (preferenceCheck.violatedRules.length > 0) {
+    reasonParts.push(`Violated: ${preferenceCheck.violatedRules.join(", ")}`);
+  }
+  if (preferenceCheck.requiresReview.length > 0) {
+    reasonParts.push(`Review: ${preferenceCheck.requiresReview.join(", ")}`);
+  }
+  if (preferenceCheck.matchedAllowedActions.length > 0) {
+    reasonParts.push(`Matched: ${preferenceCheck.matchedAllowedActions.join(", ")}`);
+  }
+  reasonParts.push(`Policy: ${preferenceCheck.decision} → Final: ${finalDecision} (mode: ${permissionMode})`);
+  const reason = reasonParts.join(" | ");
   const hookOutput = buildHookOutput(hookEventName, finalDecision, reason);
 
   // Append to log (including the exact hook output)
