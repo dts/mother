@@ -72,8 +72,8 @@ function getGitContext(cwd: string): {
   let branchName = "main";
 
   try {
-    // Check for uncommitted changes
-    const status = Bun.spawnSync(["git", "status", "--porcelain"], { cwd });
+    // Check for uncommitted changes to tracked files only (ignore untracked/swap files)
+    const status = Bun.spawnSync(["git", "status", "--porcelain", "-uno"], { cwd });
     hasCodeChanges = status.stdout.toString().trim().length > 0;
 
     // Get current branch
