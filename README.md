@@ -65,17 +65,6 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.bin/mother"
-          }
-        ]
-      }
-    ],
     "PermissionRequest": [
       {
         "matcher": "Bash|Write|Edit",
@@ -90,6 +79,11 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
   }
 }
 ```
+
+**Why PermissionRequest only?** Claude Code has its own allow list in `settings.json` (e.g., `Bash(git status)`, `Bash(bd *)`). By using only `PermissionRequest`, Claude Code's built-in permissions are respected first. Mother only intercepts when Claude Code would normally prompt you for permission, giving you two layers of control:
+
+1. **Claude Code's allow list** - Fast, no LLM call, for commands you always trust
+2. **Mother's security preferences** - LLM-evaluated rules for everything else
 
 ## Security Preferences
 

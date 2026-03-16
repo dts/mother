@@ -1,7 +1,8 @@
 # Security Preferences
 
 ## Forbidden Actions
-- None - prefer asking over blocking
+- NEVER expose secrets to the LLM. Any command that prints, echoes, cats, or logs API keys, tokens, passwords, or secret values MUST be denied. This includes reading .env, credentials.json, *_secret*, *_key*, *.pem, *.key, id_rsa, id_ed25519, or any file containing secrets without obscuring the values. Use env variable expansion ($VAR), file references, or pipe through sed/awk to obscure values instead. DENY MESSAGE: "DO NOT EXPOSE SECRETS TO YOURSELF. OBSCURE THEM USING ENV VARIABLE EXPANSION, FILES, OR SOME OTHER TECHNIQUE."
+- NEVER use secret values inline in commands (e.g., curl -H "Authorization: Bearer sk-..."). DENY MESSAGE: "DO NOT EXPOSE SECRETS TO YOURSELF. OBSCURE THEM USING ENV VARIABLE EXPANSION, FILES, OR SOME OTHER TECHNIQUE."
 
 ## Allowed Actions
 - Reading files within the project directory
