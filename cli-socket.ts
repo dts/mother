@@ -10,6 +10,7 @@
  */
 
 import { appendFile } from "fs/promises";
+import { type EvalRequest, type EvalResponse, readStdin, parseHookContext, findGitRoot } from "./shared";
 
 const SOCKET_PATH = process.env.MOTHER_SOCKET || "/tmp/mother.sock";
 const TMUX_SESSION = "mother";
@@ -22,7 +23,7 @@ async function checkStatus() {
       // @ts-ignore - Bun supports unix sockets in fetch
       unix: SOCKET_PATH,
     });
-    const status = await response.json();
+    const status = await response.json() as any;
     console.log("Mother Agent Server Status:");
     console.log(`  Status: ${status.status}`);
     console.log(`  Uptime: ${status.uptime_seconds}s`);
@@ -34,39 +35,6 @@ async function checkStatus() {
     console.log(`Start with: tmux new-session -d -s ${TMUX_SESSION} bun ${SERVER_SCRIPT}`);
     process.exit(1);
   }
-}
-
-interface EvalRequest {
-  type: "eval";
-  args: string[];
-  stdin: string;
-  cwd: string;
-  hookEventName: string;
-  permissionMode: string;
-  toolName: string;
-}
-
-interface EvalResponse {
-  type: "result" | "error";
-  message?: string;
-  triage?: {
-    promptInjectionScore: number;
-    regexFlags: string[];
-    reasoning: string;
-  };
-  explanation?: {
-    summary: string;
-    affectedPaths: string[];
-    relativeToProject: string;
-  };
-  preferenceCheck?: {
-    violatedRules: string[];
-    matchedAllowedActions: string[];
-    requiresReview: string[];
-    decision: "allow" | "deny" | "review";
-    reasoning: string;
-  };
-  hookOutput?: object;
 }
 
 function isServerRunning(): boolean {
@@ -150,47 +118,10 @@ async function main() {
     return;
   }
 
-  // Read stdin
-  let stdinContent = "";
-  const file = Bun.file("/dev/stdin");
-  const stream = file.stream();
-  const reader = stream.getReader();
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      stdinContent += new TextDecoder().decode(value);
-    }
-  } catch {
-    // No stdin available
-  }
-
-  // Parse stdin to get hook context
-  let hookEventName = "PreToolUse";
-  let permissionMode = "default";
-  let toolName = "";
-  let cwd = process.cwd();
-
-  try {
-    const parsed = JSON.parse(stdinContent);
-    hookEventName = parsed.hook_event_name || "PreToolUse";
-    permissionMode = parsed.permission_mode || "default";
-    toolName = parsed.tool_name || "";
-    cwd = parsed.cwd || cwd;
-  } catch {
-    // Not JSON, use defaults
-  }
-
-  // Find git root
-  try {
-    const result = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd });
-    if (result.exitCode === 0) {
-      cwd = result.stdout.toString().trim();
-    }
-  } catch {
-    // Not a git repo
-  }
+  const stdinContent = await readStdin();
+  const ctx = parseHookContext(stdinContent);
+  const { hookEventName, permissionMode, toolName } = ctx;
+  const cwd = findGitRoot(ctx.cwd);
 
   const request: EvalRequest = {
     type: "eval",
