@@ -147,6 +147,40 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
   };
 }
 
+async function evaluateCompletion(
+  lastMessage: string,
+  criteria: string,
+): Promise<{ satisfied: boolean; reason?: string }> {
+  const text = await queryText(`You are evaluating whether a task has been adequately completed.
+
+Here is the assistant's final message:
+<message>
+${lastMessage.slice(0, 2000)}
+</message>
+
+Here are the user's completion criteria:
+<criteria>
+${criteria}
+</criteria>
+
+Based on the message, does it appear that ALL of the completion criteria have been satisfied?
+Look for evidence that the criteria were addressed — explicit mentions of running checks, completing steps, etc.
+If the message doesn't mention something required by the criteria, assume it wasn't done.
+
+Respond in this EXACT format:
+SATISFIED: [yes|no]
+REASON: [if no, one sentence explaining what's missing]`);
+
+  const satisfiedMatch = text.match(/SATISFIED:\s*(\w+)/i);
+  const reasonMatch = text.match(/REASON:\s*(.+)/);
+
+  const satisfied = satisfiedMatch?.[1]?.toLowerCase() === "yes";
+  return {
+    satisfied,
+    reason: satisfied ? undefined : (reasonMatch?.[1] || "Custom completion criteria not met."),
+  };
+}
+
 async function startServer() {
   try {
     await unlink(SOCKET_PATH);
@@ -178,6 +212,13 @@ async function startServer() {
       }
 
       try {
+        // Route by pathname
+        if (url.pathname === "/eval-completion") {
+          const body = await req.json() as { lastMessage: string; criteria: string };
+          const result = await evaluateCompletion(body.lastMessage, body.criteria);
+          return Response.json(result);
+        }
+
         const body = (await req.json()) as EvalRequest;
 
         if (body.type !== "eval") {
