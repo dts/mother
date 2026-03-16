@@ -314,9 +314,9 @@ async function main() {
       return;
     }
 
-    // Allow read-only gh api calls (GET is the default; block POST/PUT/DELETE/PATCH)
-    if (/\bgh\s+api\b/.test(command) && !/--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i.test(command)) {
-      const hookOutput = buildHookOutput(hookEventName, "allow", "Read-only gh api call");
+    // Allow read-only gh/glab api calls (GET is the default; block POST/PUT/DELETE/PATCH)
+    if (/\b(gh|glab)\s+api\b/.test(command) && !/--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i.test(command)) {
+      const hookOutput = buildHookOutput(hookEventName, "allow", "Read-only gh/glab api call");
       console.log(JSON.stringify(hookOutput));
       return;
     }

@@ -15,6 +15,8 @@
 - Production Kubernetes is READ-ONLY - no apply, delete, exec, or modifications
 - gh CLI commands (pr create, pr view, pr list, pr checkout, pr merge, issue create, issue view, issue list, repo view, api, run view, run list, run watch)
 - gh pr creation and updates are always allowed
+- glab CLI commands (mr create, mr view, mr list, mr checkout, mr merge, issue create, issue view, issue list, repo view, api, ci view, ci list)
+- glab mr creation and updates are always allowed
 - npm/bun/yarn package info commands (npm view, npm info, npm search, bun pm, yarn info)
 - Docker commands for local development (docker run, docker build, docker compose)
 - Installing global packages INSIDE local Docker containers (isolated environments are safe)
@@ -41,5 +43,6 @@
 - Creating new executable files
 - kubectl commands that modify state (apply, delete, create, patch, edit, scale, rollout, exec)
 - Destructive gh commands (repo delete, pr close, issue close, release delete)
+- Destructive glab commands (repo delete, mr close, issue close, release delete)
 - Installing system dependencies (npm install -g, brew install, apt-get install, pip install --user, etc.)
 - Supabase remote write commands (supabase db push --linked, functions deploy, secrets set, link, projects create, branches create/delete)

@@ -5,15 +5,15 @@
     "": {
       "name": "mother",
       "dependencies": {
-        "@ai-sdk/anthropic": "^3.0.31",
-        "@anthropic-ai/claude-agent-sdk": "^0.2.39",
-        "ai": "^6.0.61",
+        "@ai-sdk/anthropic": "^3.0.58",
+        "@anthropic-ai/claude-agent-sdk": "^0.2.76",
+        "ai": "^6.0.116",
       },
       "devDependencies": {
         "@types/bun": "latest",
       },
       "peerDependencies": {
-        "typescript": "^5",
+        "typescript": "^5.9.3",
       },
     },
   },

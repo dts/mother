@@ -12,6 +12,8 @@
 import { appendFile } from "fs/promises";
 
 const SOCKET_PATH = process.env.MOTHER_SOCKET || "/tmp/mother.sock";
+const TMUX_SESSION = "mother";
+const SERVER_SCRIPT = `${import.meta.dir}/agent-server.ts`;
 
 async function checkStatus() {
   try {
@@ -29,7 +31,7 @@ async function checkStatus() {
     process.exit(0);
   } catch {
     console.log("Mother Agent Server: NOT RUNNING");
-    console.log("Start with: bun run server");
+    console.log(`Start with: tmux new-session -d -s ${TMUX_SESSION} bun ${SERVER_SCRIPT}`);
     process.exit(1);
   }
 }
@@ -65,6 +67,66 @@ interface EvalResponse {
     reasoning: string;
   };
   hookOutput?: object;
+}
+
+function isServerRunning(): boolean {
+  try {
+    const result = Bun.spawnSync(["tmux", "has-session", "-t", TMUX_SESSION]);
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+function startServer(): void {
+  Bun.spawnSync([
+    "tmux", "new-session", "-d", "-s", TMUX_SESSION,
+    "bun", SERVER_SCRIPT,
+  ]);
+}
+
+async function waitForServer(maxWaitMs = 5000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const response = await fetch(`http://localhost/health`, {
+        method: "GET",
+        // @ts-ignore - Bun supports unix sockets in fetch
+        unix: SOCKET_PATH,
+      });
+      if (response.ok) return true;
+    } catch {
+      // Not ready yet
+    }
+    await Bun.sleep(200);
+  }
+  return false;
+}
+
+async function ensureServer(): Promise<boolean> {
+  // Try a quick health check first
+  try {
+    const response = await fetch(`http://localhost/health`, {
+      method: "GET",
+      // @ts-ignore - Bun supports unix sockets in fetch
+      unix: SOCKET_PATH,
+    });
+    if (response.ok) return true;
+  } catch {
+    // Server not responding
+  }
+
+  // Start it in tmux if not already running
+  if (!isServerRunning()) {
+    console.error(`[mother] server not running, starting in tmux session "${TMUX_SESSION}"...`);
+    startServer();
+  } else {
+    console.error(`[mother] tmux session exists but server not responding, restarting...`);
+    Bun.spawnSync(["tmux", "kill-session", "-t", TMUX_SESSION]);
+    startServer();
+  }
+
+  return waitForServer();
 }
 
 async function sendToServer(request: EvalRequest): Promise<EvalResponse> {
@@ -194,21 +256,56 @@ async function main() {
     // Output hook response to stdout (this is what Claude Code reads)
     console.log(JSON.stringify(response.hookOutput || {}));
   } catch (error) {
-    // Server not running or connection failed
+    // Server not running or connection failed — try to auto-start
     const message = error instanceof Error ? error.message : "Unknown error";
-    let reason: string;
 
-    if (message.includes("ENOENT") || message.includes("ECONNREFUSED")) {
-      reason = "server not running";
-      console.error(`[mother] server not running`);
+    if (message.includes("ENOENT") || message.includes("ECONNREFUSED") || message.includes("typo in the url")) {
+      const started = await ensureServer();
+      if (started) {
+        // Retry the request
+        try {
+          console.error(`[mother] server started, retrying...`);
+          const startTime = performance.now();
+          const response = await sendToServer(request);
+          const elapsed = performance.now() - startTime;
+
+          if (response.type === "error") {
+            console.error(`[mother] server error on retry: ${response.message}`);
+            console.log(JSON.stringify({}));
+            return;
+          }
+
+          if (response.preferenceCheck) {
+            const p = response.preferenceCheck;
+            const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
+            console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
+          }
+
+          const logEntry = {
+            timestamp: new Date().toISOString(),
+            elapsed_ms: (performance.now() - startTime).toFixed(2),
+            args,
+            stdin: stdinContent,
+            cwd,
+            autoStarted: true,
+            ...response,
+          };
+          const logPath = `${import.meta.dir}/log.jsonl`;
+          await appendFile(logPath, JSON.stringify(logEntry, null, 2) + "\n");
+
+          console.log(JSON.stringify(response.hookOutput || {}));
+          return;
+        } catch (retryError) {
+          console.error(`[mother] retry failed: ${retryError instanceof Error ? retryError.message : retryError}`);
+        }
+      } else {
+        console.error(`[mother] failed to start server`);
+      }
     } else {
-      reason = `connection error: ${message}`;
-      console.error(`[mother] ${reason}`);
+      console.error(`[mother] connection error: ${message}`);
     }
 
-    console.error(`[mother] decision: ? PASSTHROUGH (${reason})`);
-
-    // Log the passthrough
+    console.error(`[mother] decision: ? PASSTHROUGH (server unavailable)`);
     const logPath = `${import.meta.dir}/log.jsonl`;
     await appendFile(logPath, JSON.stringify({
       timestamp: new Date().toISOString(),
@@ -216,7 +313,7 @@ async function main() {
       hookEventName,
       cwd,
       passthrough: true,
-      reason,
+      reason: message,
     }) + "\n");
 
     console.log(JSON.stringify({}));
