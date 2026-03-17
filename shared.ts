@@ -435,9 +435,14 @@ export function earlyBashCheck(
     );
   }
 
-  // Allow read-only gh/glab api calls
-  if (/\b(gh|glab)\s+api\b/.test(command) && !/--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i.test(command)) {
-    return buildHookOutput(hookEventName, "allow", "Read-only gh/glab api call");
+  // Allow read-only gh/glab commands deterministically (skip LLM)
+  // Covers: gh pr view/list/checks/diff, gh issue view/list, gh api (GET), gh run view/list/watch, etc.
+  const GH_READ_ONLY = /\b(gh|glab)\s+(pr\s+(view|list|checks|diff|status|ready)|issue\s+(view|list|status)|run\s+(view|list|watch)|repo\s+view|api)\b/;
+  const GH_DESTRUCTIVE = /\b(gh|glab)\s+(pr\s+(close|delete|merge)|issue\s+(close|delete)|repo\s+delete|release\s+delete)/;
+  const GH_WRITE_METHOD = /--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i;
+
+  if (GH_READ_ONLY.test(command) && !GH_DESTRUCTIVE.test(command) && !GH_WRITE_METHOD.test(command)) {
+    return buildHookOutput(hookEventName, "allow", "Read-only gh/glab command");
   }
 
   return null;

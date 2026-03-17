@@ -21,6 +21,8 @@ import {
   loadPreferences,
   applyModeLogic,
   buildDenyWithSuggestions,
+  earlyBashCheck,
+  PASSTHROUGH_TOOLS,
   extractPathsFromStdin,
 } from "./shared";
 
@@ -93,6 +95,35 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
   const inputText = `${args.join(" ")} ${stdin}`.trim();
 
   logRequest(req);
+
+  // Pass-through tools Mother should never evaluate
+  if (PASSTHROUGH_TOOLS.includes(toolName)) {
+    log("DECISION", `✓ PASSTHROUGH (${toolName})`);
+    return {
+      type: "result",
+      triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "passthrough" },
+      explanation: { summary: "Passthrough tool", affectedPaths: [], relativeToProject: cwd },
+      preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: "allow", reasoning: "passthrough" },
+      hookOutput: {},
+    };
+  }
+
+  // Early deterministic Bash checks (no LLM needed)
+  if (toolName === "Bash") {
+    const early = earlyBashCheck(hookEventName, permissionMode, stdin);
+    if (early) {
+      const decision = (early as any)?.hookSpecificOutput?.permissionDecision ||
+                       (early as any)?.hookSpecificOutput?.decision?.behavior || "allow";
+      log("DECISION", `${decision === "allow" ? "✓" : "✗"} ${decision.toUpperCase()} (deterministic)`);
+      return {
+        type: "result",
+        triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "deterministic" },
+        explanation: { summary: "Deterministic check", affectedPaths: [], relativeToProject: cwd },
+        preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: decision as any, reasoning: "deterministic" },
+        hookOutput: early,
+      };
+    }
+  }
 
   // Fast regex triage (no LLM)
   const regexFlags = regexTriage(inputText);
