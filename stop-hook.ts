@@ -73,6 +73,33 @@ async function getExecutedCommands(transcriptPath: string): Promise<string[]> {
 }
 
 /**
+ * Check if the session wrote or edited any code files (Write or Edit tool usage).
+ */
+async function sessionModifiedCode(transcriptPath: string): Promise<boolean> {
+  try {
+    const content = await readFile(transcriptPath, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "assistant" && entry.message?.content) {
+          for (const block of entry.message.content) {
+            if (block.type === "tool_use" && (block.name === "Write" || block.name === "Edit" || block.name === "MultiEdit")) {
+              return true;
+            }
+          }
+        }
+      } catch {
+        // Skip unparseable lines
+      }
+    }
+  } catch {
+    // Transcript not readable
+  }
+  return false;
+}
+
+/**
  * Check if any executed command matches patterns for a given check type.
  */
 function commandsInclude(commands: string[], patterns: RegExp[]): boolean {
@@ -284,20 +311,22 @@ async function main() {
   const commands = await getExecutedCommands(input.transcript_path);
   const scripts = getProjectScripts(cwd);
   const gitCtx = getGitContext(cwd);
+  const wroteCode = await sessionModifiedCode(input.transcript_path);
 
   // --- Layer 1: Practical checks (high priority) ---
   const practicalFailures: string[] = [];
 
-  if (scripts.hasTests && !commandsInclude(commands, TEST_PATTERNS)) {
+  // Only require tests/lint/format/typecheck if code was actually written or edited
+  if (wroteCode && scripts.hasTests && !commandsInclude(commands, TEST_PATTERNS)) {
     practicalFailures.push("Tests haven't been run. Run the project's test suite to verify changes.");
   }
-  if (scripts.hasLint && !commandsInclude(commands, LINT_PATTERNS)) {
+  if (wroteCode && scripts.hasLint && !commandsInclude(commands, LINT_PATTERNS)) {
     practicalFailures.push("Linting hasn't been run. Run the linter to catch issues.");
   }
-  if (scripts.hasFormat && !commandsInclude(commands, FORMAT_PATTERNS)) {
+  if (wroteCode && scripts.hasFormat && !commandsInclude(commands, FORMAT_PATTERNS)) {
     practicalFailures.push("Formatter hasn't been run. Run the formatter for consistent style.");
   }
-  if (scripts.hasTypeCheck && !commandsInclude(commands, TYPECHECK_PATTERNS)) {
+  if (wroteCode && scripts.hasTypeCheck && !commandsInclude(commands, TYPECHECK_PATTERNS)) {
     practicalFailures.push("Type checking hasn't been run. Run the type checker.");
   }
   if (gitCtx.hasCodeChanges) {
