@@ -74,6 +74,191 @@ export const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "WebFetch", "WebSe
 export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 export const PASSTHROUGH_TOOLS = ["AskUserQuestion"];
 
+// --- Deterministic Rules Engine ---
+
+const DETERMINISTIC_PASSTHROUGH = new Set([
+  "Read", "Grep", "Glob", "WebFetch", "WebSearch", "AskUserQuestion", "Agent",
+  "EnterPlanMode", "ExitPlanMode", "TaskCreate", "TaskGet", "TaskList",
+  "TaskUpdate", "TaskOutput", "TaskStop", "NotebookEdit", "Skill", "ToolSearch", "LSP",
+]);
+
+const SAFE_MCP_PREFIXES = [
+  "mcp__asana__", "mcp__notion__", "mcp__figma__", "mcp__slack__", "mcp__datadog-api-claude-plugin__",
+];
+
+const SAFE_BASH_PREFIXES = [
+  "ls", "pwd", "which", "wc", "head", "tail", "cat", "echo", "find", "grep", "rg",
+  "make", "pnpm", "npm", "yarn", "node", "npx", "bun", "docker", "open", "afplay",
+  "osascript", "curl", "mkdir", "cp", "mv", "pup", "sleep",
+];
+
+const SAFE_GIT_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "branch", "fetch", "rev-parse", "merge-base",
+  "stash", "remote", "tag", "describe", "shortlog", "reflog", "ls-files", "ls-tree",
+  "name-rev", "for-each-ref",
+]);
+
+const SAFE_GIT_WRITE_SUBCOMMANDS = new Set(["add", "commit", "checkout", "switch", "worktree", "gtr"]);
+
+interface DenyPattern { test: (cmd: string) => boolean; reason: string; }
+interface ReviewPattern { test: (cmd: string) => boolean; reason: string; }
+
+const HARD_DENY_PATTERNS: DenyPattern[] = [
+  { test: (cmd) => /git\s+commit\s+.*--amend/.test(cmd),
+    reason: "NEVER amend commits — always create new commits." },
+  { test: (cmd) => /git\s+push\s+.*--force/.test(cmd),
+    reason: "Force push is ALWAYS blocked." },
+  { test: (cmd) => /git\s+push\s+.*--force-with-lease/.test(cmd),
+    reason: "Force push (even with lease) is ALWAYS blocked." },
+  { test: (cmd) => /git\s+push\s+.*\b(main|master)\b/.test(cmd) && !/origin\s+(main|master):/.test(cmd),
+    reason: "NEVER push directly to main/master." },
+  { test: (cmd) => /--no-verify/.test(cmd),
+    reason: "NEVER skip git hooks (--no-verify)." },
+  { test: (cmd) => /--no-gpg-sign/.test(cmd),
+    reason: "NEVER bypass GPG signing." },
+  { test: (cmd) => /git\s+reset\s+--hard/.test(cmd),
+    reason: "git reset --hard is destructive. Needs explicit user confirmation." },
+  { test: (cmd) => /git\s+(checkout|restore)\s+\.\s*$/.test(cmd),
+    reason: "Discarding all uncommitted changes is destructive." },
+  { test: (cmd) => /git\s+clean\s+-[a-zA-Z]*f/.test(cmd),
+    reason: "git clean -f removes untracked files irreversibly." },
+  { test: (cmd) => /git\s+(rebase|add)\s+-i/.test(cmd),
+    reason: "Interactive mode (-i) does not work in Claude Code." },
+  { test: (cmd) => /git\s+branch\s+-D/.test(cmd),
+    reason: "Force-deleting branches (-D) is dangerous. Use -d." },
+  { test: (cmd) => /\bxargs\b/.test(cmd),
+    reason: "Prefer subagents over xargs." },
+  { test: (cmd) => /\bsudo\b/.test(cmd),
+    reason: "sudo commands are not allowed." },
+  { test: (cmd) => /rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?[/~]\s*$/.test(cmd),
+    reason: "Catastrophically broad rm command." },
+  { test: (cmd) => />\s*\.env\b/.test(cmd) || />\s*credentials/.test(cmd) || />\s*.*\.pem/.test(cmd),
+    reason: "Writing to secrets/credential files is not allowed." },
+  { test: (cmd) => /\b(gh|glab)\s+(pr\s+(merge)|repo\s+delete|release\s+delete)/.test(cmd),
+    reason: "Merge/delete operations via gh/glab are blocked." },
+];
+
+const REVIEW_PATTERNS: ReviewPattern[] = [
+  { test: (cmd) => /git\s+push/.test(cmd),
+    reason: "git push requires explicit user permission every time." },
+  { test: (cmd) => {
+      if (!/rm\s+(-[a-zA-Z]*r[a-zA-Z]*)/.test(cmd)) return false;
+      const safeTargets = /rm\s+-\S+\s+(\S*\/)?(node_modules|\.next|dist|build|\.turbo|\.cache|coverage|tmp)\s*$/;
+      return !safeTargets.test(cmd);
+    }, reason: "Recursive deletion outside known safe targets needs review." },
+  { test: (cmd) => /\b(chmod|chown)\b/.test(cmd), reason: "Changing file permissions needs review." },
+  { test: (cmd) => /\b(kill|killall)\b/.test(cmd), reason: "Killing processes needs review." },
+  { test: (cmd) => /\b(ssh|scp|rsync)\s+[^-]/.test(cmd) && !/localhost/.test(cmd),
+    reason: "Remote network operations need review." },
+  { test: (cmd) => /install\s+(-g|--global)/.test(cmd), reason: "Global package installs need review." },
+  { test: (cmd) => /\.claude\/settings\.json/.test(cmd) || /\.claude\/settings\.local\.json/.test(cmd),
+    reason: "Modifying Claude settings needs review." },
+  { test: (cmd) => /\|\s*(sh|bash|zsh|eval)\b/.test(cmd), reason: "Piping to shell needs review." },
+  { test: (cmd) => /\bbrew\s+(install|uninstall|remove)/.test(cmd), reason: "Homebrew install/uninstall needs review." },
+  { test: (cmd) => /\b(\/etc\/|\/usr\/|\/var\/|\/System\/)/.test(cmd) && !/\/usr\/local\//.test(cmd),
+    reason: "Writing to system directories needs review." },
+];
+
+export type DeterministicDecision = "allow" | "deny" | "ask";
+
+export interface DeterministicResult {
+  decision: DeterministicDecision;
+  reason: string;
+}
+
+function getFirstWord(cmd: string): string {
+  const parts = cmd.split(/\s+/);
+  for (const part of parts) { if (!part.includes("=")) return part; }
+  return parts[0] || "";
+}
+
+/**
+ * Fast deterministic evaluation of tool calls.
+ * Returns a result if the rules engine can decide, or null to fall through to LLM.
+ */
+export function evaluateDeterministic(stdinContent: string): DeterministicResult | null {
+  let toolName: string;
+  let toolInput: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(stdinContent);
+    toolName = parsed.tool_name || "";
+    toolInput = parsed.tool_input || {};
+  } catch {
+    return null;
+  }
+
+  // Passthrough tools — always allow
+  if (DETERMINISTIC_PASSTHROUGH.has(toolName))
+    return { decision: "allow", reason: "Passthrough tool" };
+
+  // Safe MCP tools
+  if (SAFE_MCP_PREFIXES.some((p) => toolName.startsWith(p)))
+    return { decision: "allow", reason: "Safe MCP tool" };
+
+  // File write/edit — always allow (mode logic applied later)
+  if (toolName === "Write" || toolName === "Edit")
+    return { decision: "allow", reason: "File write/edit allowed" };
+
+  // Bash commands — full deterministic evaluation
+  if (toolName === "Bash") {
+    const cmd = typeof toolInput.command === "string" ? toolInput.command.trim() : null;
+    if (!cmd) return { decision: "ask", reason: "Empty bash command" };
+
+    // Hard deny patterns
+    for (const p of HARD_DENY_PATTERNS) {
+      if (p.test(cmd)) return { decision: "deny", reason: p.reason };
+    }
+
+    // Review patterns
+    for (const p of REVIEW_PATTERNS) {
+      if (p.test(cmd)) return { decision: "ask", reason: p.reason };
+    }
+
+    // Check each part of compound commands
+    const parts = cmd.split(/\s*(?:&&|\|\||;)\s*/);
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const firstWord = getFirstWord(trimmed);
+
+      if (SAFE_BASH_PREFIXES.some((p) => firstWord === p)) continue;
+
+      if (firstWord === "git") {
+        const gitArgs = trimmed.replace(/^git\s+/, "");
+        const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
+        const effectiveGitCmd = dashCMatch ? dashCMatch[1] : gitArgs;
+        const sub = effectiveGitCmd.split(/\s+/)[0] || "";
+        if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;
+        return null; // unknown git subcommand → LLM
+      }
+
+      if (firstWord === "rm") {
+        const safe = /rm\s+(-\S+\s+)?(\S*\/)?(node_modules|\.next|dist|build|\.turbo|\.cache|coverage|tmp|\.tsbuildinfo)\s*$/;
+        if (safe.test(trimmed)) continue;
+        return null; // unknown rm target → LLM
+      }
+
+      // Scripts in ~/.claude/scripts/
+      const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+      if (trimmed.startsWith("~/.claude/scripts/") || trimmed.startsWith(`${homeDir}/.claude/scripts`)) continue;
+
+      // Security keychain ops
+      if (firstWord === "security") continue;
+
+      // gh/glab read-only (already checked deny/review patterns above)
+      const GH_READ_ONLY = /\b(gh|glab)\s+(pr\s+(view|list|checks|diff|status|ready)|issue\s+(view|list|status)|run\s+(view|list|watch)|repo\s+view|api)\b/;
+      const GH_WRITE_METHOD = /--method\s+(POST|PUT|DELETE|PATCH)|-X\s+(POST|PUT|DELETE|PATCH)/i;
+      if (GH_READ_ONLY.test(trimmed) && !GH_WRITE_METHOD.test(trimmed)) continue;
+
+      return null; // unrecognized command → LLM
+    }
+
+    return { decision: "allow", reason: "All command parts matched safe patterns" };
+  }
+
+  return null; // unknown tool → LLM
+}
+
 // --- Shared prompt for LLM evaluation ---
 
 export function buildEvalPrompt(

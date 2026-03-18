@@ -23,6 +23,7 @@ import {
   earlyBashCheck,
   buildDenyWithSuggestions,
   extractPathsFromStdin,
+  evaluateDeterministic,
 } from "./shared";
 
 // Bun automatically loads .env files
@@ -49,7 +50,33 @@ async function main() {
     return;
   }
 
-  // Early deterministic Bash checks
+  // Stage 0: Deterministic rules engine (no LLM needed)
+  const deterministic = evaluateDeterministic(stdinContent);
+  if (deterministic) {
+    // Apply mode logic on top of deterministic decision
+    const modeDecision = deterministic.decision === "ask" ? "review" as const
+      : deterministic.decision === "deny" ? "deny" as const
+      : "allow" as const;
+    const modeResult = applyModeLogic(modeDecision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
+    let reason = modeResult.reason || deterministic.reason;
+    if (modeResult.decision === "deny") {
+      reason = buildDenyWithSuggestions(toolName, stdinContent, reason);
+    }
+    const hookOutput = buildHookOutput(hookEventName, modeResult.decision, reason);
+
+    const logPath = `${import.meta.dir}/log.jsonl`;
+    await appendFile(logPath, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      tool: toolName, source: "deterministic",
+      decision: modeResult.decision, reason,
+      command: toolName === "Bash" ? stdinContent.match(/"command"\s*:\s*"([^"]+)"/)?.[1] : undefined,
+    }) + "\n");
+
+    console.log(JSON.stringify(hookOutput));
+    return;
+  }
+
+  // Early deterministic Bash checks (legacy, for cases not covered above)
   if (toolName === "Bash") {
     const early = earlyBashCheck(hookEventName, permissionMode, stdinContent);
     if (early) {
