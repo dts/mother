@@ -170,6 +170,11 @@ async function main() {
       const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
       console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
       console.error(`[mother] reason: ${p.reasoning}`);
+      if (p.decision === "ask") {
+        console.error('\x1b]99;muster;state=permission\x07');
+      } else {
+        console.error('\x1b]99;muster;state=busy\x07');
+      }
     }
 
     // Log the result to file
@@ -210,6 +215,11 @@ async function main() {
             const p = response.preferenceCheck;
             const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
             console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
+            if (p.decision === "ask") {
+              console.error('\x1b]99;muster;state=permission\x07');
+            } else {
+              console.error('\x1b]99;muster;state=busy\x07');
+            }
           }
 
           const logEntry = {
