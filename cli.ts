@@ -45,6 +45,11 @@ async function main() {
   let { hookEventName, permissionMode, toolName, cwd } = ctx;
   cwd = findGitRoot(cwd);
 
+  // Clear any stale "permission" state up front — by the time mother is
+  // running, claude is actively trying to do something, so the dot should
+  // not still say "needs human attention" from a previous turn.
+  await notifyMuster("working");
+
   // Pass through tools Mother should never evaluate
   if (PASSTHROUGH_TOOLS.includes(toolName)) {
     console.log(JSON.stringify({}));
@@ -73,9 +78,10 @@ async function main() {
       command: toolName === "Bash" ? stdinContent.match(/"command"\s*:\s*"([^"]+)"/)?.[1] : undefined,
     }) + "\n");
 
-    if (modeResult.decision === "ask") {
-      await notifyMuster("permission", reason);
-    }
+    await notifyMuster(
+      modeResult.decision === "ask" ? "permission" : "working",
+      reason,
+    );
 
     console.log(JSON.stringify(hookOutput));
     return;
@@ -134,9 +140,10 @@ async function main() {
     hookOutput,
   }, null, 2) + "\n");
 
-  if (modeResult.decision === "ask") {
-    await notifyMuster("permission", reason);
-  }
+  await notifyMuster(
+    modeResult.decision === "ask" ? "permission" : "working",
+    reason,
+  );
 
   console.log(JSON.stringify(hookOutput));
 }

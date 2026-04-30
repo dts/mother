@@ -119,6 +119,9 @@ async function main() {
     return;
   }
 
+  // Clear any stale "permission" state up front — see cli.ts for rationale.
+  await notifyMuster("working");
+
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
   const { hookEventName, permissionMode, toolName } = ctx;
@@ -214,9 +217,10 @@ async function main() {
             const p = response.preferenceCheck;
             const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
             console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
-            if (p.decision === "review") {
-              await notifyMuster("permission", p.reasoning);
-            }
+            await notifyMuster(
+              p.decision === "review" ? "permission" : "working",
+              p.reasoning,
+            );
           }
 
           const logEntry = {
