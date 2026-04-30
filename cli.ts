@@ -25,6 +25,7 @@ import {
   extractPathsFromStdin,
   evaluateDeterministic,
 } from "./shared";
+import { notifyMuster } from "./muster";
 
 // Bun automatically loads .env files
 const anthropic = createAnthropic({
@@ -72,6 +73,10 @@ async function main() {
       command: toolName === "Bash" ? stdinContent.match(/"command"\s*:\s*"([^"]+)"/)?.[1] : undefined,
     }) + "\n");
 
+    if (modeResult.decision === "ask") {
+      await notifyMuster("permission", reason);
+    }
+
     console.log(JSON.stringify(hookOutput));
     return;
   }
@@ -90,11 +95,8 @@ async function main() {
   // Stage 1: Regex triage for prompt injection
   const regexFlags = regexTriage(inputText);
   if (regexFlags.length > 0) {
-    const hookOutput = buildHookOutput(
-      hookEventName,
-      "ask",
-      `Potential prompt injection: Suspicious patterns: ${regexFlags.join(", ")}`,
-    );
+    const reason = `Potential prompt injection: Suspicious patterns: ${regexFlags.join(", ")}`;
+    const hookOutput = buildHookOutput(hookEventName, "ask", reason);
     const logPath = `${import.meta.dir}/log.jsonl`;
     await appendFile(logPath, JSON.stringify({
       timestamp: new Date().toISOString(),
@@ -102,6 +104,7 @@ async function main() {
       triage: { promptInjectionScore: 0, regexFlags, reasoning: "Regex flags" },
       hookOutput,
     }, null, 2) + "\n");
+    await notifyMuster("permission", reason);
     console.log(JSON.stringify(hookOutput));
     return;
   }
@@ -130,6 +133,10 @@ async function main() {
     preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: result.decision, reasoning: result.reasoning },
     hookOutput,
   }, null, 2) + "\n");
+
+  if (modeResult.decision === "ask") {
+    await notifyMuster("permission", reason);
+  }
 
   console.log(JSON.stringify(hookOutput));
 }
