@@ -2,57 +2,32 @@
  * Persistent Agent Server
  *
  * Runs as a background daemon and handles permission evaluation requests
- * over a Unix socket. Uses Claude Code Agent SDK with a persistent session.
+ * over a Unix socket.
  *
  * Usage:
  *   bun agent-server.ts        # Start the server
  *   bun agent-server.ts stop   # Stop a running server
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, unlink } from "fs/promises";
+import { runAnalysisPipeline } from "./analysis-pipeline";
+import { createLlmBackend, queryClaudeSubscription, selectLlmBackend } from "./llm-backends";
+import { DEFAULT_INSTANCE_NAME, DEFAULT_PID_FILE, DEFAULT_SOCKET_PATH, SERVER_DIR } from "./server-identity";
 import {
   type EvalRequest,
   type EvalResponse,
-  regexTriage,
   buildHookOutput,
-  buildEvalPrompt,
-  parseEvalResponse,
   loadPreferences,
   applyModeLogic,
   buildDenyWithSuggestions,
   earlyBashCheck,
   PASSTHROUGH_TOOLS,
   extractPathsFromStdin,
+  evaluateDeterministic,
 } from "./shared";
 
-const SOCKET_PATH = process.env.MOTHER_SOCKET || "/tmp/mother.sock";
-const PID_FILE = "/tmp/mother.pid";
-
-// Query using Claude Code Agent SDK (uses subscription, not API credits)
-async function queryText(prompt: string): Promise<string> {
-  const q = query({
-    prompt,
-    options: {
-      model: "claude-haiku-4-5-20251001",
-      maxTurns: 1,
-      tools: [],
-      persistSession: false,
-    },
-  });
-
-  let result = "";
-  for await (const msg of q) {
-    if (msg.type === "assistant") {
-      for (const block of msg.message.content) {
-        if (block.type === "text") {
-          result += block.text;
-        }
-      }
-    }
-  }
-  return result;
-}
+const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
+const PID_FILE = process.env.MOTHER_PID_FILE || DEFAULT_PID_FILE;
 
 function log(stage: string, message: string) {
   const timestamp = new Date().toISOString().slice(11, 23);
@@ -64,6 +39,7 @@ function logRequest(req: EvalRequest) {
   console.error(`[${new Date().toISOString().slice(11, 23)}] NEW REQUEST`);
   console.error("=".repeat(80));
   console.error(`Tool: ${req.toolName || "unknown"}`);
+  console.error(`Client: ${req.client}`);
   console.error(`Hook: ${req.hookEventName}`);
   console.error(`CWD: ${req.cwd}`);
   console.error(`Mode: ${req.permissionMode}`);
@@ -91,9 +67,7 @@ function logRequest(req: EvalRequest) {
 }
 
 async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
-  const { args, stdin, cwd, hookEventName, permissionMode, toolName } = req;
-  const inputText = `${args.join(" ")} ${stdin}`.trim();
-
+  const { args, stdin, cwd, client, hookEventName, permissionMode, toolName } = req;
   logRequest(req);
 
   // Pass-through tools Mother should never evaluate
@@ -105,6 +79,28 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
       explanation: { summary: "Passthrough tool", affectedPaths: [], relativeToProject: cwd },
       preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: "allow", reasoning: "passthrough" },
       hookOutput: {},
+    };
+  }
+
+  // Stage 0: Deterministic rules engine (no LLM needed)
+  const deterministic = evaluateDeterministic(stdin);
+  if (deterministic) {
+    const modeDecision = deterministic.decision === "ask" ? "review" as const
+      : deterministic.decision === "deny" ? "deny" as const
+      : "allow" as const;
+    const modeResult = applyModeLogic(modeDecision, permissionMode, toolName, extractPathsFromStdin(stdin));
+    let reason = modeResult.reason || deterministic.reason;
+    if (modeResult.decision === "deny") {
+      reason = buildDenyWithSuggestions(toolName, stdin, reason);
+    }
+
+    log("DECISION", `${modeResult.decision === "allow" ? "✓" : modeResult.decision === "deny" ? "✗" : "?"} ${modeResult.decision.toUpperCase()} (deterministic)`);
+    return {
+      type: "result",
+      triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "deterministic" },
+      explanation: { summary: "Deterministic check", affectedPaths: extractPathsFromStdin(stdin), relativeToProject: cwd },
+      preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: modeDecision, reasoning: reason },
+      hookOutput: buildHookOutput(hookEventName, modeResult.decision, reason),
     };
   }
 
@@ -125,55 +121,32 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
     }
   }
 
-  // Fast regex triage (no LLM)
-  const regexFlags = regexTriage(inputText);
-  if (regexFlags.length > 0) {
-    log("TRIAGE", `⚠️  Regex flags: ${regexFlags.join(", ")}`);
-    log("DECISION", `? ASK (suspicious patterns)`);
-    return {
-      type: "result",
-      triage: { promptInjectionScore: 0, regexFlags, reasoning: "Suspicious patterns detected" },
-      explanation: { summary: "Flagged by regex", affectedPaths: [], relativeToProject: "N/A" },
-      preferenceCheck: {
-        violatedRules: [], matchedAllowedActions: [], requiresReview: ["Suspicious patterns"],
-        decision: "review", reasoning: `Patterns: ${regexFlags.join(", ")}`,
-      },
-      hookOutput: buildHookOutput(hookEventName, "ask", `Suspicious patterns: ${regexFlags.join(", ")}`),
-    };
-  }
-
   // Load security preferences
-  const preferences = await loadPreferences(cwd);
+  const preferences = await loadPreferences(cwd, client);
 
-  // Single combined LLM evaluation
-  log("EVAL", "evaluating request...");
-  const prompt = buildEvalPrompt(toolName, args, stdin, cwd, preferences);
-  const text = await queryText(prompt);
-  const result = parseEvalResponse(text);
-  log("EVAL", `${result.summary}`);
-  log("DECISION", `${result.decision === "allow" ? "✓" : result.decision === "deny" ? "✗" : "?"} ${result.decision.toUpperCase()} - ${result.reasoning}`);
+  // Multi-pass LLM evaluation
+  const backend = createLlmBackend({ client, cwd });
+  log("EVAL", `evaluating request with ${selectLlmBackend(client)} backend...`);
+  const result = await runAnalysisPipeline(backend, { args, stdin, cwd, client, toolName, preferences });
+  log("TRIAGE", `score=${result.triage.promptInjectionScore} flags=[${result.triage.regexFlags.join(",")}]`);
+  log("EVAL", `${result.explanation.summary}`);
+  log("DECISION", `${result.preferenceCheck.decision === "allow" ? "✓" : result.preferenceCheck.decision === "deny" ? "✗" : "?"} ${result.preferenceCheck.decision.toUpperCase()} - ${result.preferenceCheck.reasoning}`);
 
   // Apply mode-specific logic
-  const modeResult = applyModeLogic(result.decision, permissionMode, toolName, extractPathsFromStdin(stdin));
+  const modeResult = applyModeLogic(result.preferenceCheck.decision, permissionMode, toolName, extractPathsFromStdin(stdin));
   const finalDecision = modeResult.decision;
 
   // Build reason: prefer mode override reason, then deny message, then LLM reasoning
-  let reason = modeResult.reason || result.denyMessage || result.reasoning;
+  let reason = modeResult.reason || result.denyMessage || result.preferenceCheck.reasoning;
   if (finalDecision === "deny") {
     reason = buildDenyWithSuggestions(toolName, stdin, reason);
   }
 
   return {
     type: "result",
-    triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "passed" },
-    explanation: { summary: result.summary, affectedPaths: [], relativeToProject: cwd },
-    preferenceCheck: {
-      violatedRules: [],
-      matchedAllowedActions: [],
-      requiresReview: [],
-      decision: result.decision,
-      reasoning: result.reasoning,
-    },
+    triage: result.triage,
+    explanation: result.explanation,
+    preferenceCheck: result.preferenceCheck,
     hookOutput: buildHookOutput(hookEventName, finalDecision, reason),
   };
 }
@@ -182,7 +155,7 @@ async function evaluateCompletion(
   lastMessage: string,
   criteria: string,
 ): Promise<{ satisfied: boolean; reason?: string }> {
-  const text = await queryText(`You are evaluating whether a task has been adequately completed.
+  const text = await queryClaudeSubscription(`You are evaluating whether a task has been adequately completed.
 
 Here is the assistant's final message:
 <message>
@@ -232,6 +205,10 @@ async function startServer() {
       if (req.method === "GET" && url.pathname === "/health") {
         return Response.json({
           status: "ok",
+          instance: DEFAULT_INSTANCE_NAME,
+          server_dir: SERVER_DIR,
+          socket_path: SOCKET_PATH,
+          provider_mode: process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto",
           uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
           requests_handled: requestCount,
           pid: process.pid,
