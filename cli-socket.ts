@@ -10,31 +10,54 @@
  */
 
 import { appendFile } from "fs/promises";
+import { DEFAULT_INSTANCE_NAME, DEFAULT_PID_FILE, DEFAULT_PROVIDER_MODE, DEFAULT_SOCKET_PATH, SERVER_DIR } from "./server-identity";
 import { type EvalRequest, type EvalResponse, readStdin, parseHookContext, findGitRoot } from "./shared";
 
-const SOCKET_PATH = process.env.MOTHER_SOCKET || "/tmp/mother.sock";
-const TMUX_SESSION = "mother";
+const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
+const TMUX_SESSION = process.env.MOTHER_TMUX_SESSION || DEFAULT_INSTANCE_NAME;
+const PID_FILE = process.env.MOTHER_PID_FILE || DEFAULT_PID_FILE;
+const PROVIDER_MODE = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
 const SERVER_SCRIPT = `${import.meta.dir}/agent-server.ts`;
 
-async function checkStatus() {
+async function fetchHealth(): Promise<any | null> {
   try {
     const response = await fetch(`http://localhost/health`, {
       method: "GET",
       // @ts-ignore - Bun supports unix sockets in fetch
       unix: SOCKET_PATH,
     });
-    const status = await response.json() as any;
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+function healthMatchesThisCheckout(status: any): boolean {
+  return status?.server_dir === SERVER_DIR || status?.instance === DEFAULT_INSTANCE_NAME;
+}
+
+async function checkStatus() {
+  const status = await fetchHealth();
+  if (status) {
     console.log("Mother Agent Server Status:");
     console.log(`  Status: ${status.status}`);
+    if (status.instance) console.log(`  Instance: ${status.instance}`);
+    if (status.server_dir) console.log(`  Server dir: ${status.server_dir}`);
+    if (status.socket_path) console.log(`  Socket: ${status.socket_path}`);
+    if (status.provider_mode) console.log(`  Provider mode: ${status.provider_mode}`);
     console.log(`  Uptime: ${status.uptime_seconds}s`);
     console.log(`  Requests: ${status.requests_handled}`);
     console.log(`  PID: ${status.pid}`);
+    if (!healthMatchesThisCheckout(status)) {
+      console.log(`  Warning: socket is served by a different Mother checkout than ${SERVER_DIR}`);
+    }
     process.exit(0);
-  } catch {
-    console.log("Mother Agent Server: NOT RUNNING");
-    console.log(`Start with: tmux new-session -d -s ${TMUX_SESSION} bun ${SERVER_SCRIPT}`);
-    process.exit(1);
   }
+
+  console.log("Mother Agent Server: NOT RUNNING");
+  console.log(`Start with: tmux new-session -d -s ${TMUX_SESSION} bun ${SERVER_SCRIPT}`);
+  process.exit(1);
 }
 
 function isServerRunning(): boolean {
@@ -49,6 +72,11 @@ function isServerRunning(): boolean {
 function startServer(): void {
   Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", TMUX_SESSION,
+    "env",
+    `MOTHER_SOCKET=${SOCKET_PATH}`,
+    `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
+    `MOTHER_PID_FILE=${PID_FILE}`,
+    `MOTHER_LLM_BACKEND=${PROVIDER_MODE}`,
     "bun", SERVER_SCRIPT,
   ]);
 }
@@ -56,16 +84,8 @@ function startServer(): void {
 async function waitForServer(maxWaitMs = 5000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    try {
-      const response = await fetch(`http://localhost/health`, {
-        method: "GET",
-        // @ts-ignore - Bun supports unix sockets in fetch
-        unix: SOCKET_PATH,
-      });
-      if (response.ok) return true;
-    } catch {
-      // Not ready yet
-    }
+    const status = await fetchHealth();
+    if (status && healthMatchesThisCheckout(status)) return true;
     await Bun.sleep(200);
   }
   return false;
@@ -73,15 +93,12 @@ async function waitForServer(maxWaitMs = 5000): Promise<boolean> {
 
 async function ensureServer(): Promise<boolean> {
   // Try a quick health check first
-  try {
-    const response = await fetch(`http://localhost/health`, {
-      method: "GET",
-      // @ts-ignore - Bun supports unix sockets in fetch
-      unix: SOCKET_PATH,
-    });
-    if (response.ok) return true;
-  } catch {
-    // Server not responding
+  const status = await fetchHealth();
+  if (status && healthMatchesThisCheckout(status)) {
+    return true;
+  }
+  if (status && !healthMatchesThisCheckout(status)) {
+    console.error(`[mother] socket ${SOCKET_PATH} belongs to another checkout; using session "${TMUX_SESSION}" for ${SERVER_DIR}`);
   }
 
   // Start it in tmux if not already running
@@ -106,7 +123,7 @@ async function sendToServer(request: EvalRequest): Promise<EvalResponse> {
     unix: SOCKET_PATH,
   });
 
-  return response.json();
+  return response.json() as Promise<EvalResponse>;
 }
 
 async function main() {
@@ -120,7 +137,7 @@ async function main() {
 
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
-  const { hookEventName, permissionMode, toolName } = ctx;
+  const { client, hookEventName, permissionMode, toolName } = ctx;
   const cwd = findGitRoot(ctx.cwd);
 
   const request: EvalRequest = {
@@ -128,13 +145,14 @@ async function main() {
     args,
     stdin: stdinContent,
     cwd,
+    client,
     hookEventName,
     permissionMode,
     toolName,
   };
 
   try {
-    console.error(`[mother] evaluating ${toolName || "request"}...`);
+    console.error(`[mother] evaluating ${client}/${toolName || "request"}...`);
     const startTime = performance.now();
     const response = await sendToServer(request);
     const elapsed = performance.now() - startTime;
@@ -170,7 +188,7 @@ async function main() {
       const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
       console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
       console.error(`[mother] reason: ${p.reasoning}`);
-      if (p.decision === "ask") {
+      if (p.decision === "review") {
         console.error('\x1b]99;muster;state=permission\x07');
       } else {
         console.error('\x1b]99;muster;state=busy\x07');
@@ -215,7 +233,7 @@ async function main() {
             const p = response.preferenceCheck;
             const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
             console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
-            if (p.decision === "ask") {
+            if (p.decision === "review") {
               console.error('\x1b]99;muster;state=permission\x07');
             } else {
               console.error('\x1b]99;muster;state=busy\x07');

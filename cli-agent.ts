@@ -8,13 +8,10 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { appendFile } from "fs/promises";
+import { runAnalysisPipeline } from "./analysis-pipeline";
 import {
-  type AnalysisResult,
   PASSTHROUGH_TOOLS,
-  regexTriage,
   buildHookOutput,
-  buildEvalPrompt,
-  parseEvalResponse,
   readStdin,
   parseHookContext,
   findGitRoot,
@@ -23,6 +20,7 @@ import {
   earlyBashCheck,
   buildDenyWithSuggestions,
   extractPathsFromStdin,
+  evaluateDeterministic,
 } from "./shared";
 
 async function queryText(prompt: string): Promise<string> {
@@ -53,11 +51,25 @@ async function main() {
   const args = process.argv.slice(2);
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
-  let { hookEventName, permissionMode, toolName, cwd } = ctx;
+  let { client, hookEventName, permissionMode, toolName, cwd } = ctx;
   cwd = findGitRoot(cwd);
 
   if (PASSTHROUGH_TOOLS.includes(toolName)) {
     console.log(JSON.stringify({}));
+    return;
+  }
+
+  const deterministic = evaluateDeterministic(stdinContent);
+  if (deterministic) {
+    const modeDecision = deterministic.decision === "ask" ? "review" as const
+      : deterministic.decision === "deny" ? "deny" as const
+      : "allow" as const;
+    const modeResult = applyModeLogic(modeDecision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
+    let reason = modeResult.reason || deterministic.reason;
+    if (modeResult.decision === "deny") {
+      reason = buildDenyWithSuggestions(toolName, stdinContent, reason);
+    }
+    console.log(JSON.stringify(buildHookOutput(hookEventName, modeResult.decision, reason)));
     return;
   }
 
@@ -69,33 +81,12 @@ async function main() {
     }
   }
 
-  const inputText = `${args.join(" ")} ${stdinContent}`.trim();
+  const preferences = await loadPreferences(cwd, client);
+  const backend = { name: "claude-subscription" as const, generateText: queryText };
+  const result = await runAnalysisPipeline(backend, { args, stdin: stdinContent, cwd, client, toolName, preferences });
 
-  const regexFlags = regexTriage(inputText);
-  if (regexFlags.length > 0) {
-    const hookOutput = buildHookOutput(
-      hookEventName,
-      "ask",
-      `Potential prompt injection: Suspicious patterns: ${regexFlags.join(", ")}`,
-    );
-    const logPath = `${import.meta.dir}/log.jsonl`;
-    await appendFile(logPath, JSON.stringify({
-      timestamp: new Date().toISOString(),
-      args, stdin: stdinContent, cwd,
-      triage: { promptInjectionScore: 0, regexFlags, reasoning: "Regex flags" },
-      hookOutput,
-    }, null, 2) + "\n");
-    console.log(JSON.stringify(hookOutput));
-    return;
-  }
-
-  const preferences = await loadPreferences(cwd);
-  const prompt = buildEvalPrompt(toolName, args, stdinContent, cwd, preferences);
-  const text = await queryText(prompt);
-  const result = parseEvalResponse(text);
-
-  const modeResult = applyModeLogic(result.decision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
-  let reason = modeResult.reason || result.denyMessage || result.reasoning;
+  const modeResult = applyModeLogic(result.preferenceCheck.decision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
+  let reason = modeResult.reason || result.denyMessage || result.preferenceCheck.reasoning;
   if (modeResult.decision === "deny") {
     reason = buildDenyWithSuggestions(toolName, stdinContent, reason);
   }
@@ -106,9 +97,10 @@ async function main() {
   await appendFile(logPath, JSON.stringify({
     timestamp: new Date().toISOString(),
     args, stdin: stdinContent, cwd,
-    triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "passed" },
-    explanation: { summary: result.summary, affectedPaths: [], relativeToProject: cwd },
-    preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: result.decision, reasoning: result.reasoning },
+    backend: backend.name,
+    triage: result.triage,
+    explanation: result.explanation,
+    preferenceCheck: result.preferenceCheck,
     hookOutput,
   }, null, 2) + "\n");
 
