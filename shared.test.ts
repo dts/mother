@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { selectEvalProvider } from "./evaluator";
+import { selectLlmBackend } from "./llm-backends";
 import { applyModeLogic, buildHookOutput, extractPathsFromStdin, parseHookContext } from "./shared";
 
+const originalBackend = process.env.MOTHER_LLM_BACKEND;
 const originalProvider = process.env.MOTHER_EVAL_PROVIDER;
 const originalLegacyProvider = process.env.MOTHER_PROVIDER;
 
 afterEach(() => {
+  if (originalBackend === undefined) {
+    delete process.env.MOTHER_LLM_BACKEND;
+  } else {
+    process.env.MOTHER_LLM_BACKEND = originalBackend;
+  }
   if (originalProvider === undefined) {
     delete process.env.MOTHER_EVAL_PROVIDER;
   } else {
@@ -74,17 +80,27 @@ describe("Codex hook normalization", () => {
 
 describe("evaluator provider selection", () => {
   test("auto mode uses Codex for Codex clients", () => {
+    delete process.env.MOTHER_LLM_BACKEND;
     delete process.env.MOTHER_EVAL_PROVIDER;
     delete process.env.MOTHER_PROVIDER;
-    expect(selectEvalProvider("codex")).toBe("codex");
-    expect(selectEvalProvider("claude")).toBe("claude");
+    expect(selectLlmBackend("codex")).toBe("codex-subscription");
+    expect(selectLlmBackend("claude")).toBe("claude-subscription");
   });
 
   test("explicit provider override wins", () => {
-    process.env.MOTHER_EVAL_PROVIDER = "claude";
-    expect(selectEvalProvider("codex")).toBe("claude");
+    process.env.MOTHER_LLM_BACKEND = "claude";
+    expect(selectLlmBackend("codex")).toBe("claude-subscription");
 
-    process.env.MOTHER_EVAL_PROVIDER = "codex";
-    expect(selectEvalProvider("claude")).toBe("codex");
+    process.env.MOTHER_LLM_BACKEND = "codex";
+    expect(selectLlmBackend("claude")).toBe("codex-subscription");
+  });
+
+  test("supports API and local backends", () => {
+    process.env.MOTHER_LLM_BACKEND = "anthropic-api";
+    expect(selectLlmBackend("codex")).toBe("anthropic-api");
+    process.env.MOTHER_LLM_BACKEND = "openai-api";
+    expect(selectLlmBackend("claude")).toBe("openai-api");
+    process.env.MOTHER_LLM_BACKEND = "local";
+    expect(selectLlmBackend("claude")).toBe("local");
   });
 });

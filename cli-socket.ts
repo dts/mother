@@ -16,7 +16,7 @@ import { type EvalRequest, type EvalResponse, readStdin, parseHookContext, findG
 const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
 const TMUX_SESSION = process.env.MOTHER_TMUX_SESSION || DEFAULT_INSTANCE_NAME;
 const PID_FILE = process.env.MOTHER_PID_FILE || DEFAULT_PID_FILE;
-const PROVIDER_MODE = process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
+const PROVIDER_MODE = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
 const SERVER_SCRIPT = `${import.meta.dir}/agent-server.ts`;
 
 async function fetchHealth(): Promise<any | null> {
@@ -76,7 +76,7 @@ function startServer(): void {
     `MOTHER_SOCKET=${SOCKET_PATH}`,
     `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
     `MOTHER_PID_FILE=${PID_FILE}`,
-    `MOTHER_EVAL_PROVIDER=${PROVIDER_MODE}`,
+    `MOTHER_LLM_BACKEND=${PROVIDER_MODE}`,
     "bun", SERVER_SCRIPT,
   ]);
 }

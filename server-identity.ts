@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 
 const instanceHash = createHash("sha1").update(import.meta.dir).digest("hex").slice(0, 10);
 const tempDir = tmpdir();
-const configuredProvider = (process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto").toLowerCase();
+const configuredProvider = (process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto").toLowerCase();
 const providerSlug = configuredProvider === "anthropic"
   ? "claude"
   : configuredProvider === "openai"

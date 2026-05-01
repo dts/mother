@@ -28,7 +28,7 @@ A permission evaluation system for Claude Code hooks. Analyzes tool requests thr
 
 ## How it works
 
-Mother runs a 3-stage analysis pipeline using Claude Haiku:
+Mother runs the same analysis pipeline for Claude and Codex requests. The LLM backend is pluggable, but the logical passes stay the same:
 
 1. **Triage** - Detects prompt injection attempts via regex patterns and LLM analysis. Only flags linguistic manipulation (fake system prompts, instruction overrides), not dangerous operations.
 
@@ -36,19 +36,23 @@ Mother runs a 3-stage analysis pipeline using Claude Haiku:
 
 3. **Preference Check** - Evaluates against rules in `security-preferences.md` to decide: allow, deny, or require review.
 
+The default backend mode is `auto`: Claude requests use the Claude Code subscription backend, and Codex requests use the Codex subscription backend.
+
 ## Setup
 
 ```bash
 # Install dependencies
 bun install
 
-# Add your Anthropic API key
+# Optional: add API keys if you want API-backed LLM evaluation instead of subscriptions.
+# Subscription-backed Claude/Codex modes do not need these.
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+echo "OPENAI_API_KEY=sk-..." >> .env
 
 # Install the wrapper globally (update path to your mother directory)
 mkdir -p ~/.bin
 echo '#!/usr/bin/env bash' > ~/.bin/mother
-echo 'exec bun /path/to/mother/cli.ts "$@"' >> ~/.bin/mother
+echo 'exec bun /path/to/mother/cli-socket.ts "$@"' >> ~/.bin/mother
 chmod +x ~/.bin/mother
 
 # Ensure ~/.bin is in your PATH
@@ -71,7 +75,7 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "~/.bin/mother"
+            "command": "MOTHER_LLM_BACKEND=claude ~/.bin/mother"
           }
         ]
       }
@@ -104,7 +108,7 @@ matcher = "^(Bash|apply_patch|mcp__.*)$"
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
-command = "MOTHER_EVAL_PROVIDER=codex ~/.bin/mother"
+command = "MOTHER_LLM_BACKEND=codex ~/.bin/mother"
 timeout = 120
 statusMessage = "Checking approval request"
 ```
@@ -122,13 +126,28 @@ If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, 
 
 The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
 
-`MOTHER_EVAL_PROVIDER=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
+`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
 
-Provider controls:
+## LLM Backends
 
-- `MOTHER_EVAL_PROVIDER=auto` (default): Codex requests use Codex; Claude requests use Claude.
-- `MOTHER_EVAL_PROVIDER=codex`: always use Codex for LLM evaluation.
-- `MOTHER_EVAL_PROVIDER=claude`: always use Claude Code Agent SDK for LLM evaluation.
+Mother's analysis pipeline accepts any backend that can answer text prompts. Configure it with `MOTHER_LLM_BACKEND`:
+
+- `auto` (default): Codex requests use `codex-subscription`; Claude requests use `claude-subscription`.
+- `codex` / `codex-subscription`: uses `codex exec` and your logged-in Codex/ChatGPT subscription.
+- `claude` / `claude-subscription`: uses Claude Code Agent SDK and your Claude Code subscription.
+- `anthropic-api`: uses Vercel AI SDK with `@ai-sdk/anthropic`; requires `ANTHROPIC_API_KEY`.
+- `openai-api`: uses `OPENAI_API_KEY` against an OpenAI-compatible `/v1/chat/completions` endpoint.
+- `ai-gateway`: uses Vercel AI Gateway through `@ai-sdk/gateway`; requires the gateway's normal auth.
+- `local`: uses an OpenAI-compatible local endpoint, defaulting to `http://localhost:11434/v1`.
+
+Model/backend environment variables:
+
+- `MOTHER_LLM_MODEL`: generic model override for API, gateway, and local modes.
+- `MOTHER_ANTHROPIC_MODEL`: Anthropic API model override.
+- `MOTHER_OPENAI_MODEL`: OpenAI API model override.
+- `OPENAI_BASE_URL`: optional OpenAI-compatible API base URL for `openai-api`.
+- `MOTHER_LOCAL_BASE_URL`: local OpenAI-compatible base URL, default `http://localhost:11434/v1`.
+- `MOTHER_LOCAL_MODEL`: local model override.
 - `MOTHER_CODEX_MODEL`: optional model override for the nested `codex exec`.
 - `MOTHER_CODEX_TIMEOUT_MS`: optional timeout, default `120000`.
 

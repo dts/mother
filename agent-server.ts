@@ -10,15 +10,13 @@
  */
 
 import { readFile, unlink } from "fs/promises";
-import { queryClaudeSubscription, queryEvalProvider, selectEvalProvider } from "./evaluator";
+import { runAnalysisPipeline } from "./analysis-pipeline";
+import { createLlmBackend, queryClaudeSubscription, selectLlmBackend } from "./llm-backends";
 import { DEFAULT_INSTANCE_NAME, DEFAULT_PID_FILE, DEFAULT_SOCKET_PATH, SERVER_DIR } from "./server-identity";
 import {
   type EvalRequest,
   type EvalResponse,
-  regexTriage,
   buildHookOutput,
-  buildEvalPrompt,
-  parseEvalResponse,
   loadPreferences,
   applyModeLogic,
   buildDenyWithSuggestions,
@@ -70,8 +68,6 @@ function logRequest(req: EvalRequest) {
 
 async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
   const { args, stdin, cwd, client, hookEventName, permissionMode, toolName } = req;
-  const inputText = `${args.join(" ")} ${stdin}`.trim();
-
   logRequest(req);
 
   // Pass-through tools Mother should never evaluate
@@ -125,55 +121,32 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
     }
   }
 
-  // Fast regex triage (no LLM)
-  const regexFlags = regexTriage(inputText);
-  if (regexFlags.length > 0) {
-    log("TRIAGE", `⚠️  Regex flags: ${regexFlags.join(", ")}`);
-    log("DECISION", `? ASK (suspicious patterns)`);
-    return {
-      type: "result",
-      triage: { promptInjectionScore: 0, regexFlags, reasoning: "Suspicious patterns detected" },
-      explanation: { summary: "Flagged by regex", affectedPaths: [], relativeToProject: "N/A" },
-      preferenceCheck: {
-        violatedRules: [], matchedAllowedActions: [], requiresReview: ["Suspicious patterns"],
-        decision: "review", reasoning: `Patterns: ${regexFlags.join(", ")}`,
-      },
-      hookOutput: buildHookOutput(hookEventName, "ask", `Suspicious patterns: ${regexFlags.join(", ")}`),
-    };
-  }
-
   // Load security preferences
   const preferences = await loadPreferences(cwd, client);
 
-  // Single combined LLM evaluation
-  log("EVAL", `evaluating request with ${selectEvalProvider(client)} provider...`);
-  const prompt = buildEvalPrompt(toolName, args, stdin, cwd, preferences);
-  const text = await queryEvalProvider(prompt, { client, cwd });
-  const result = parseEvalResponse(text);
-  log("EVAL", `${result.summary}`);
-  log("DECISION", `${result.decision === "allow" ? "✓" : result.decision === "deny" ? "✗" : "?"} ${result.decision.toUpperCase()} - ${result.reasoning}`);
+  // Multi-pass LLM evaluation
+  const backend = createLlmBackend({ client, cwd });
+  log("EVAL", `evaluating request with ${selectLlmBackend(client)} backend...`);
+  const result = await runAnalysisPipeline(backend, { args, stdin, cwd, client, toolName, preferences });
+  log("TRIAGE", `score=${result.triage.promptInjectionScore} flags=[${result.triage.regexFlags.join(",")}]`);
+  log("EVAL", `${result.explanation.summary}`);
+  log("DECISION", `${result.preferenceCheck.decision === "allow" ? "✓" : result.preferenceCheck.decision === "deny" ? "✗" : "?"} ${result.preferenceCheck.decision.toUpperCase()} - ${result.preferenceCheck.reasoning}`);
 
   // Apply mode-specific logic
-  const modeResult = applyModeLogic(result.decision, permissionMode, toolName, extractPathsFromStdin(stdin));
+  const modeResult = applyModeLogic(result.preferenceCheck.decision, permissionMode, toolName, extractPathsFromStdin(stdin));
   const finalDecision = modeResult.decision;
 
   // Build reason: prefer mode override reason, then deny message, then LLM reasoning
-  let reason = modeResult.reason || result.denyMessage || result.reasoning;
+  let reason = modeResult.reason || result.denyMessage || result.preferenceCheck.reasoning;
   if (finalDecision === "deny") {
     reason = buildDenyWithSuggestions(toolName, stdin, reason);
   }
 
   return {
     type: "result",
-    triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "passed" },
-    explanation: { summary: result.summary, affectedPaths: [], relativeToProject: cwd },
-    preferenceCheck: {
-      violatedRules: [],
-      matchedAllowedActions: [],
-      requiresReview: [],
-      decision: result.decision,
-      reasoning: result.reasoning,
-    },
+    triage: result.triage,
+    explanation: result.explanation,
+    preferenceCheck: result.preferenceCheck,
     hookOutput: buildHookOutput(hookEventName, finalDecision, reason),
   };
 }
@@ -235,7 +208,7 @@ async function startServer() {
           instance: DEFAULT_INSTANCE_NAME,
           server_dir: SERVER_DIR,
           socket_path: SOCKET_PATH,
-          provider_mode: process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto",
+          provider_mode: process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto",
           uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
           requests_handled: requestCount,
           pid: process.pid,

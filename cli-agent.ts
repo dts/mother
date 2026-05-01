@@ -8,13 +8,10 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { appendFile } from "fs/promises";
+import { runAnalysisPipeline } from "./analysis-pipeline";
 import {
-  type AnalysisResult,
   PASSTHROUGH_TOOLS,
-  regexTriage,
   buildHookOutput,
-  buildEvalPrompt,
-  parseEvalResponse,
   readStdin,
   parseHookContext,
   findGitRoot,
@@ -84,33 +81,12 @@ async function main() {
     }
   }
 
-  const inputText = `${args.join(" ")} ${stdinContent}`.trim();
-
-  const regexFlags = regexTriage(inputText);
-  if (regexFlags.length > 0) {
-    const hookOutput = buildHookOutput(
-      hookEventName,
-      "ask",
-      `Potential prompt injection: Suspicious patterns: ${regexFlags.join(", ")}`,
-    );
-    const logPath = `${import.meta.dir}/log.jsonl`;
-    await appendFile(logPath, JSON.stringify({
-      timestamp: new Date().toISOString(),
-      args, stdin: stdinContent, cwd,
-      triage: { promptInjectionScore: 0, regexFlags, reasoning: "Regex flags" },
-      hookOutput,
-    }, null, 2) + "\n");
-    console.log(JSON.stringify(hookOutput));
-    return;
-  }
-
   const preferences = await loadPreferences(cwd, client);
-  const prompt = buildEvalPrompt(toolName, args, stdinContent, cwd, preferences);
-  const text = await queryText(prompt);
-  const result = parseEvalResponse(text);
+  const backend = { name: "claude-subscription" as const, generateText: queryText };
+  const result = await runAnalysisPipeline(backend, { args, stdin: stdinContent, cwd, client, toolName, preferences });
 
-  const modeResult = applyModeLogic(result.decision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
-  let reason = modeResult.reason || result.denyMessage || result.reasoning;
+  const modeResult = applyModeLogic(result.preferenceCheck.decision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
+  let reason = modeResult.reason || result.denyMessage || result.preferenceCheck.reasoning;
   if (modeResult.decision === "deny") {
     reason = buildDenyWithSuggestions(toolName, stdinContent, reason);
   }
@@ -121,9 +97,10 @@ async function main() {
   await appendFile(logPath, JSON.stringify({
     timestamp: new Date().toISOString(),
     args, stdin: stdinContent, cwd,
-    triage: { promptInjectionScore: 0, regexFlags: [], reasoning: "passed" },
-    explanation: { summary: result.summary, affectedPaths: [], relativeToProject: cwd },
-    preferenceCheck: { violatedRules: [], matchedAllowedActions: [], requiresReview: [], decision: result.decision, reasoning: result.reasoning },
+    backend: backend.name,
+    triage: result.triage,
+    explanation: result.explanation,
+    preferenceCheck: result.preferenceCheck,
     hookOutput,
   }, null, 2) + "\n");
 
