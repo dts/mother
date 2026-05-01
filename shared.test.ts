@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { selectLlmBackend } from "./llm-backends";
-import { applyModeLogic, buildHookOutput, extractPathsFromStdin, parseHookContext } from "./shared";
+import {
+  applyModeLogic,
+  buildHookOutput,
+  evaluateDeterministic,
+  extractPathsFromStdin,
+  parseHookContext,
+} from "./shared";
 
 const originalBackend = process.env.MOTHER_LLM_BACKEND;
 const originalProvider = process.env.MOTHER_EVAL_PROVIDER;
@@ -62,6 +68,52 @@ describe("Codex hook normalization", () => {
         command: "*** Begin Patch\n*** Update File: README.md\n*** End Patch",
       },
     }))).toContain("README.md");
+  });
+
+  test("normalizes Codex exec_command payloads", () => {
+    const stdin = JSON.stringify({
+      turn_id: "turn_456",
+      hook_event_name: "PermissionRequest",
+      tool_name: "exec_command",
+      tool_input: {
+        cmd: "GIT_EDITOR=true git rebase --continue",
+        description: "Continue the rebase after resolving conflicts.",
+      },
+      cwd: "/tmp/project",
+    });
+
+    const ctx = parseHookContext(stdin);
+    expect(ctx).toEqual({
+      client: "codex",
+      hookEventName: "PermissionRequest",
+      permissionMode: "codex",
+      toolName: "Bash",
+      cwd: "/tmp/project",
+    });
+    expect(evaluateDeterministic(stdin)).toEqual({
+      decision: "allow",
+      reason: "All command parts matched safe patterns",
+    });
+  });
+
+  test("deterministic checks support cmd and still deny force pushes", () => {
+    const stdin = JSON.stringify({
+      tool_name: "exec_command",
+      tool_input: { cmd: "git push --force origin feature" },
+    });
+
+    expect(evaluateDeterministic(stdin)).toEqual({
+      decision: "deny",
+      reason: "Force push is ALWAYS blocked.",
+    });
+  });
+
+  test("extracts paths from Codex cmd input", () => {
+    const paths = extractPathsFromStdin(JSON.stringify({
+      tool_input: { cmd: "sed -n '1,20p' ./src/index.ts" },
+    }));
+
+    expect(paths).toContain("./src/index.ts");
   });
 
   test("codex mode maps policy decisions directly to PermissionRequest output", () => {

@@ -174,6 +174,28 @@ function getFirstWord(cmd: string): string {
   return parts[0] || "";
 }
 
+export function normalizeToolName(toolName: string): string {
+  if (toolName === "exec_command") return "Bash";
+  return toolName;
+}
+
+export function getToolCommand(toolInput: Record<string, unknown>): string | null {
+  if (typeof toolInput.command === "string") return toolInput.command;
+  if (typeof toolInput.cmd === "string") return toolInput.cmd;
+  return null;
+}
+
+function stripLeadingEnvAssignments(cmd: string): string {
+  let remaining = cmd.trim();
+  if (remaining.startsWith("env ")) {
+    remaining = remaining.replace(/^env\s+/, "").trim();
+  }
+  while (/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/.test(remaining)) {
+    remaining = remaining.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/, "").trim();
+  }
+  return remaining;
+}
+
 /**
  * Fast deterministic evaluation of tool calls.
  * Returns a result if the rules engine can decide, or null to fall through to LLM.
@@ -183,7 +205,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
   let toolInput: Record<string, unknown>;
   try {
     const parsed = JSON.parse(stdinContent);
-    toolName = parsed.tool_name || "";
+    toolName = normalizeToolName(parsed.tool_name || parsed.toolName || "");
     toolInput = parsed.tool_input || {};
   } catch {
     return null;
@@ -203,7 +225,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
 
   // Bash commands — full deterministic evaluation
   if (toolName === "Bash") {
-    const cmd = typeof toolInput.command === "string" ? toolInput.command.trim() : null;
+    const cmd = getToolCommand(toolInput)?.trim() || null;
     if (!cmd) return { decision: "ask", reason: "Empty bash command" };
 
     // Hard deny patterns
@@ -219,7 +241,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
     // Check each part of compound commands
     const parts = cmd.split(/\s*(?:&&|\|\||;)\s*/);
     for (const part of parts) {
-      const trimmed = part.trim();
+      const trimmed = stripLeadingEnvAssignments(part);
       if (!trimmed) continue;
       const firstWord = getFirstWord(trimmed);
 
@@ -229,6 +251,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
         const gitArgs = trimmed.replace(/^git\s+/, "");
         const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
         const effectiveGitCmd = dashCMatch?.[1] ?? gitArgs;
+        if (/^rebase\s+--(continue|abort|quit)\b/.test(effectiveGitCmd)) continue;
         const sub = effectiveGitCmd.split(/\s+/)[0] || "";
         if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;
         return null; // unknown git subcommand → LLM
@@ -405,13 +428,15 @@ export function parseHookContext(stdinContent: string): {
 
   try {
     const parsed = JSON.parse(stdinContent);
-    toolName = parsed.tool_name || parsed.toolName || "";
+    const rawToolName = parsed.tool_name || parsed.toolName || "";
+    toolName = normalizeToolName(rawToolName);
 
     const explicitClient = String(parsed.client || parsed.hook_client || parsed.source_client || "").toLowerCase();
     const hasClaudeOnlyFields = parsed.permission_mode !== undefined || parsed.transcript_path !== undefined;
     const hasCodexOnlyFields =
       parsed.turn_id !== undefined ||
       parsed.tool_input?.description !== undefined ||
+      rawToolName === "exec_command" ||
       toolName === "apply_patch";
     if (explicitClient === "codex" || (!hasClaudeOnlyFields && hasCodexOnlyFields)) {
       client = "codex";
@@ -479,13 +504,14 @@ export function extractPathsFromStdin(stdin: string): string[] {
     const paths: string[] = [];
     if (input.file_path) paths.push(input.file_path);
     if (input.path) paths.push(input.path);
-    if (input.command) {
+    const command = getToolCommand(input);
+    if (command) {
       // Extract paths from bash commands (best effort)
-      const matches = input.command.match(/(?:^|\s)(\/\S+|\.\/\S+|\.\.\S+)/g);
+      const matches = command.match(/(?:^|\s)(\/\S+|\.\/\S+|\.\.\S+)/g);
       if (matches) paths.push(...matches.map((m: string) => m.trim()));
 
       // Extract paths from apply_patch payloads.
-      const patchPathMatches = [...String(input.command).matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s+(.+)$/gm)];
+      const patchPathMatches = [...command.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s+(.+)$/gm)];
       paths.push(...patchPathMatches.map((match) => match[1]?.trim()).filter((path): path is string => !!path));
     }
     return paths;
@@ -641,8 +667,14 @@ export function earlyBashCheck(
   permissionMode: string,
   stdinContent: string,
 ): object | null {
-  const commandMatch = stdinContent.match(/"command"\s*:\s*"([^"]+)"/);
-  const command = commandMatch?.[1] || "";
+  let command = "";
+  try {
+    const parsed = JSON.parse(stdinContent);
+    command = getToolCommand(parsed.tool_input || {}) || "";
+  } catch {
+    const commandMatch = stdinContent.match(/"(?:command|cmd)"\s*:\s*"([^"]+)"/);
+    command = commandMatch?.[1] || "";
+  }
 
   // Deny xargs in acceptEdits mode
   if (permissionMode === "acceptEdits" && command.includes("xargs")) {

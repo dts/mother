@@ -104,7 +104,7 @@ Add to `~/.codex/config.toml` or `<repo>/.codex/config.toml`:
 codex_hooks = true
 
 [[hooks.PermissionRequest]]
-matcher = "^(Bash|apply_patch|mcp__.*)$"
+matcher = "^(Bash|exec_command|apply_patch|mcp__.*)$"
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
