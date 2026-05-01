@@ -41,7 +41,7 @@ async function main() {
   const args = process.argv.slice(2);
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
-  let { hookEventName, permissionMode, toolName, cwd } = ctx;
+  let { client, hookEventName, permissionMode, toolName, cwd } = ctx;
   cwd = findGitRoot(cwd);
 
   // Pass through tools Mother should never evaluate
@@ -107,7 +107,7 @@ async function main() {
   }
 
   // Stage 2: LLM evaluation
-  const preferences = await loadPreferences(cwd);
+  const preferences = await loadPreferences(cwd, client);
   const prompt = buildEvalPrompt(toolName, args, stdinContent, cwd, preferences);
   const text = await queryText(prompt);
   const result = parseEvalResponse(text);

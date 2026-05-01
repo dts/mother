@@ -6,6 +6,7 @@
     "start:agent": "bun cli-agent.ts",
     "start:socket": "bun cli-socket.ts",
     "server": "bun agent-server.ts",
+    "server:codex": "MOTHER_EVAL_PROVIDER=codex bun agent-server.ts",
     "server:stop": "bun agent-server.ts stop",
     "server:status": "bun cli-socket.ts status",
     "eval": "bun eval.ts"

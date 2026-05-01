@@ -85,13 +85,64 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
 1. **Claude Code's allow list** - Fast, no LLM call, for commands you always trust
 2. **Mother's security preferences** - LLM-evaluated rules for everything else
 
+## Codex Integration
+
+Mother also understands Codex hook payloads. When the incoming payload looks like Codex (`turn_id`, `apply_patch`, or Codex's approval `description` field), Mother switches to `codex` mode:
+
+- `PermissionRequest` allow -> Codex approval is granted
+- `PermissionRequest` deny -> Codex approval is rejected
+- `review`/`ask` -> Mother returns `{}` so Codex shows its normal approval prompt
+
+Add to `~/.codex/config.toml` or `<repo>/.codex/config.toml`:
+
+```toml
+[features]
+codex_hooks = true
+
+[[hooks.PermissionRequest]]
+matcher = "^(Bash|apply_patch|mcp__.*)$"
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "MOTHER_EVAL_PROVIDER=codex ~/.bin/mother"
+timeout = 120
+statusMessage = "Checking approval request"
+```
+
+The command should point at a wrapper that runs this checkout's socket CLI:
+
+```bash
+mkdir -p ~/.bin
+echo '#!/usr/bin/env bash' > ~/.bin/mother
+echo 'exec bun /path/to/mother/cli-socket.ts "$@"' >> ~/.bin/mother
+chmod +x ~/.bin/mother
+```
+
+If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, no separate wrapper is needed.
+
+The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
+
+`MOTHER_EVAL_PROVIDER=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
+
+Provider controls:
+
+- `MOTHER_EVAL_PROVIDER=auto` (default): Codex requests use Codex; Claude requests use Claude.
+- `MOTHER_EVAL_PROVIDER=codex`: always use Codex for LLM evaluation.
+- `MOTHER_EVAL_PROVIDER=claude`: always use Claude Code Agent SDK for LLM evaluation.
+- `MOTHER_CODEX_MODEL`: optional model override for the nested `codex exec`.
+- `MOTHER_CODEX_TIMEOUT_MS`: optional timeout, default `120000`.
+
 ## Security Preferences
 
-Mother looks for security preferences in this order:
+Mother looks for security preferences in client-specific order:
 
-1. **Repo-specific**: `.claude/security-preferences.md` (in your project's git root)
-2. **Global**: `~/.claude/security-preferences.md`
-3. **Permissive fallback**: If neither exists, allows project-local operations and reviews everything else
+For Codex requests:
+1. **Repo-specific Codex**: `.codex/security-preferences.md` (in your project's git root)
+2. **Global Codex**: `~/.codex/security-preferences.md`
+3. **Repo-specific Claude fallback**: `.claude/security-preferences.md`
+4. **Global Claude fallback**: `~/.claude/security-preferences.md`
+
+For Claude requests, the `.claude` locations are checked first and `.codex` is only a fallback. If none exists, Mother uses the permissive fallback: allow project-local operations and review everything else.
 
 This lets you have strict global defaults while relaxing rules for specific projects (e.g., allowing `git push` in a trusted repo).
 
@@ -134,7 +185,7 @@ Mother outputs JSON that Claude Code understands:
     "hookEventName": "PermissionRequest",
     "decision": {
       "behavior": "allow" | "deny",
-      "message": "..."
+      "message": "..." // present for denials
     }
   }
 }

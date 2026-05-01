@@ -23,6 +23,7 @@ import {
   earlyBashCheck,
   buildDenyWithSuggestions,
   extractPathsFromStdin,
+  evaluateDeterministic,
 } from "./shared";
 
 async function queryText(prompt: string): Promise<string> {
@@ -53,11 +54,25 @@ async function main() {
   const args = process.argv.slice(2);
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
-  let { hookEventName, permissionMode, toolName, cwd } = ctx;
+  let { client, hookEventName, permissionMode, toolName, cwd } = ctx;
   cwd = findGitRoot(cwd);
 
   if (PASSTHROUGH_TOOLS.includes(toolName)) {
     console.log(JSON.stringify({}));
+    return;
+  }
+
+  const deterministic = evaluateDeterministic(stdinContent);
+  if (deterministic) {
+    const modeDecision = deterministic.decision === "ask" ? "review" as const
+      : deterministic.decision === "deny" ? "deny" as const
+      : "allow" as const;
+    const modeResult = applyModeLogic(modeDecision, permissionMode, toolName, extractPathsFromStdin(stdinContent));
+    let reason = modeResult.reason || deterministic.reason;
+    if (modeResult.decision === "deny") {
+      reason = buildDenyWithSuggestions(toolName, stdinContent, reason);
+    }
+    console.log(JSON.stringify(buildHookOutput(hookEventName, modeResult.decision, reason)));
     return;
   }
 
@@ -89,7 +104,7 @@ async function main() {
     return;
   }
 
-  const preferences = await loadPreferences(cwd);
+  const preferences = await loadPreferences(cwd, client);
   const prompt = buildEvalPrompt(toolName, args, stdinContent, cwd, preferences);
   const text = await queryText(prompt);
   const result = parseEvalResponse(text);

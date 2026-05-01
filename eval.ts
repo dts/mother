@@ -1,9 +1,6 @@
 import { generateText } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { config } from "dotenv";
 import { readFile } from "fs/promises";
-
-config({ path: `${import.meta.dir}/.env`, quiet: true });
 
 const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const haiku = anthropic("claude-haiku-4-5-20251001");
@@ -783,7 +780,7 @@ REASONING: [one sentence explanation]`,
   const scoreMatch = text.match(/SCORE:\s*(\d+)/);
   const reasoningMatch = text.match(/REASONING:\s*(.+)/);
 
-  const score = scoreMatch ? parseInt(scoreMatch[1], 10) : -1;
+  const score = scoreMatch ? parseInt(scoreMatch[1] ?? "-1", 10) : -1;
   const reasoning = reasoningMatch?.[1] || "No reasoning";
 
   const judgeResult = await judgeTriageResult(testCase, score, regexFlags, reasoning);

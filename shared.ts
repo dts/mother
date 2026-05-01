@@ -37,6 +37,7 @@ export interface EvalRequest {
   args: string[];
   stdin: string;
   cwd: string;
+  client: HookClient;
   hookEventName: string;
   permissionMode: string;
   toolName: string;
@@ -71,8 +72,9 @@ export const SUSPICIOUS_PATTERNS = [
 ];
 
 export const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoRead"];
-export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "apply_patch"];
 export const PASSTHROUGH_TOOLS = ["AskUserQuestion"];
+export type HookClient = "claude" | "codex";
 
 // --- Deterministic Rules Engine ---
 
@@ -196,7 +198,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
     return { decision: "allow", reason: "Safe MCP tool" };
 
   // File write/edit — always allow (mode logic applied later)
-  if (toolName === "Write" || toolName === "Edit")
+  if (toolName === "Write" || toolName === "Edit" || toolName === "apply_patch")
     return { decision: "allow", reason: "File write/edit allowed" };
 
   // Bash commands — full deterministic evaluation
@@ -226,7 +228,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");
         const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
-        const effectiveGitCmd = dashCMatch ? dashCMatch[1] : gitArgs;
+        const effectiveGitCmd = dashCMatch?.[1] ?? gitArgs;
         const sub = effectiveGitCmd.split(/\s+/)[0] || "";
         if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;
         return null; // unknown git subcommand → LLM
@@ -354,10 +356,9 @@ export function buildHookOutput(
     return {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
-        decision: {
-          behavior: decision,
-          message: reason,
-        },
+        decision: decision === "deny"
+          ? { behavior: decision, message: reason }
+          : { behavior: decision },
       },
     };
   }
@@ -390,11 +391,13 @@ export async function readStdin(): Promise<string> {
 }
 
 export function parseHookContext(stdinContent: string): {
+  client: HookClient;
   hookEventName: string;
   permissionMode: string;
   toolName: string;
   cwd: string;
 } {
+  let client: HookClient = "claude";
   let hookEventName = "PreToolUse";
   let permissionMode = "default";
   let toolName = "";
@@ -402,21 +405,38 @@ export function parseHookContext(stdinContent: string): {
 
   try {
     const parsed = JSON.parse(stdinContent);
-    hookEventName = parsed.hook_event_name || "PreToolUse";
-    const rawMode = parsed.permission_mode || "default";
+    toolName = parsed.tool_name || parsed.toolName || "";
+
+    const explicitClient = String(parsed.client || parsed.hook_client || parsed.source_client || "").toLowerCase();
+    const hasClaudeOnlyFields = parsed.permission_mode !== undefined || parsed.transcript_path !== undefined;
+    const hasCodexOnlyFields =
+      parsed.turn_id !== undefined ||
+      parsed.tool_input?.description !== undefined ||
+      toolName === "apply_patch";
+    if (explicitClient === "codex" || (!hasClaudeOnlyFields && hasCodexOnlyFields)) {
+      client = "codex";
+    }
+
+    hookEventName =
+      parsed.hook_event_name ||
+      parsed.hookEventName ||
+      (client === "codex" && toolName ? "PermissionRequest" : "PreToolUse");
+
+    const rawMode = parsed.permission_mode || parsed.permissionMode || (client === "codex" ? "codex" : "default");
     if (rawMode === "plan" || rawMode === "planMode") {
       permissionMode = "plan";
     } else if (rawMode === "acceptEdits" || rawMode === "acceptAllEdits") {
       permissionMode = "acceptEdits";
+    } else if (rawMode === "codex") {
+      permissionMode = "codex";
     } else {
       permissionMode = "default";
     }
-    toolName = parsed.tool_name || "";
     cwd = parsed.cwd || cwd;
   } catch {
     // Not JSON, use defaults
   }
-  return { hookEventName, permissionMode, toolName, cwd };
+  return { client, hookEventName, permissionMode, toolName, cwd };
 }
 
 export function findGitRoot(cwd: string): string {
@@ -431,17 +451,21 @@ export function findGitRoot(cwd: string): string {
   return cwd;
 }
 
-export async function loadPreferences(cwd: string): Promise<string> {
+export async function loadPreferences(cwd: string, client: HookClient = "claude"): Promise<string> {
   const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
-  try {
-    return await readFile(`${cwd}/.claude/security-preferences.md`, "utf-8");
-  } catch {
+  const codexCandidates = [`${cwd}/.codex/security-preferences.md`, `${homeDir}/.codex/security-preferences.md`];
+  const claudeCandidates = [`${cwd}/.claude/security-preferences.md`, `${homeDir}/.claude/security-preferences.md`];
+  const candidates = client === "codex"
+    ? [...codexCandidates, ...claudeCandidates]
+    : [...claudeCandidates, ...codexCandidates];
+  for (const candidate of candidates) {
     try {
-      return await readFile(`${homeDir}/.claude/security-preferences.md`, "utf-8");
+      return await readFile(candidate, "utf-8");
     } catch {
-      return "";
+      // Try the next preference location.
     }
   }
+  return "";
 }
 
 /**
@@ -459,6 +483,10 @@ export function extractPathsFromStdin(stdin: string): string[] {
       // Extract paths from bash commands (best effort)
       const matches = input.command.match(/(?:^|\s)(\/\S+|\.\/\S+|\.\.\S+)/g);
       if (matches) paths.push(...matches.map((m: string) => m.trim()));
+
+      // Extract paths from apply_patch payloads.
+      const patchPathMatches = [...String(input.command).matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s+(.+)$/gm)];
+      paths.push(...patchPathMatches.map((match) => match[1]?.trim()).filter((path): path is string => !!path));
     }
     return paths;
   } catch {
@@ -470,6 +498,7 @@ export function extractPathsFromStdin(stdin: string): string[] {
  * Apply mode-specific logic to map a policy decision to a final hook decision.
  *
  * - acceptEdits: review → allow (user opted into autonomy)
+ * - codex: allow/deny/review map directly to allow/deny/ask for PermissionRequest
  * - plan: reads/investigation → allow, real code writes → deny, plan doc writes → allow
  * - default: write-tool allow → ask (conservative)
  */
@@ -487,6 +516,10 @@ export function applyModeLogic(
 
   const isReadOnly = READ_ONLY_TOOLS.includes(toolName);
   const isWrite = WRITE_TOOLS.includes(toolName);
+
+  if (permissionMode === "codex") {
+    return { decision: finalDecision };
+  }
 
   if (permissionMode === "plan" || permissionMode === "planMode") {
     if (toolName === "ExitPlanMode") {
