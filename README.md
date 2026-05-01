@@ -124,6 +124,8 @@ chmod +x ~/.bin/mother
 
 If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, no separate wrapper is needed.
 
+Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when the Codex process starts. Mother only receives `PermissionRequest` events, so sandbox-allowed tool calls can appear in Codex logs without corresponding Mother log entries. If Codex asks you directly for approval, check that the active config still includes `codex_hooks = true` and the `exec_command` matcher.
+
 The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
 
 `MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
