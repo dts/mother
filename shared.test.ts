@@ -108,6 +108,18 @@ describe("Codex hook normalization", () => {
     });
   });
 
+  test("allows local amend commits", () => {
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "git commit --amend --no-edit" },
+    });
+
+    expect(evaluateDeterministic(stdin)).toEqual({
+      decision: "allow",
+      reason: "All command parts matched safe patterns",
+    });
+  });
+
   test("extracts paths from Codex cmd input", () => {
     const paths = extractPathsFromStdin(JSON.stringify({
       tool_input: { cmd: "sed -n '1,20p' ./src/index.ts" },

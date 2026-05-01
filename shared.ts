@@ -106,8 +106,6 @@ interface DenyPattern { test: (cmd: string) => boolean; reason: string; }
 interface ReviewPattern { test: (cmd: string) => boolean; reason: string; }
 
 const HARD_DENY_PATTERNS: DenyPattern[] = [
-  { test: (cmd) => /git\s+commit\s+.*--amend/.test(cmd),
-    reason: "NEVER amend commits — always create new commits." },
   { test: (cmd) => /git\s+push\s+.*--force/.test(cmd),
     reason: "Force push is ALWAYS blocked." },
   { test: (cmd) => /git\s+push\s+.*--force-with-lease/.test(cmd),
