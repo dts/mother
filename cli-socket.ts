@@ -12,6 +12,7 @@
 import { appendFile } from "fs/promises";
 import { DEFAULT_INSTANCE_NAME, DEFAULT_PID_FILE, DEFAULT_PROVIDER_MODE, DEFAULT_SOCKET_PATH, SERVER_DIR } from "./server-identity";
 import { type EvalRequest, type EvalResponse, readStdin, parseHookContext, findGitRoot } from "./shared";
+import { notifyMuster } from "./muster";
 
 const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
 const TMUX_SESSION = process.env.MOTHER_TMUX_SESSION || DEFAULT_INSTANCE_NAME;
@@ -135,6 +136,9 @@ async function main() {
     return;
   }
 
+  // Clear any stale "permission" state up front — see cli.ts for rationale.
+  await notifyMuster("working");
+
   const stdinContent = await readStdin();
   const ctx = parseHookContext(stdinContent);
   const { client, hookEventName, permissionMode, toolName } = ctx;
@@ -188,11 +192,10 @@ async function main() {
       const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
       console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
       console.error(`[mother] reason: ${p.reasoning}`);
-      if (p.decision === "review") {
-        console.error('\x1b]99;muster;state=permission\x07');
-      } else {
-        console.error('\x1b]99;muster;state=busy\x07');
-      }
+      await notifyMuster(
+        p.decision === "review" ? "permission" : "working",
+        p.reasoning,
+      );
     }
 
     // Log the result to file
@@ -233,11 +236,10 @@ async function main() {
             const p = response.preferenceCheck;
             const icon = p.decision === "allow" ? "✓" : p.decision === "deny" ? "✗" : "?";
             console.error(`[mother] decision: ${icon} ${p.decision.toUpperCase()} (${elapsed.toFixed(0)}ms)`);
-            if (p.decision === "review") {
-              console.error('\x1b]99;muster;state=permission\x07');
-            } else {
-              console.error('\x1b]99;muster;state=busy\x07');
-            }
+            await notifyMuster(
+              p.decision === "review" ? "permission" : "working",
+              p.reasoning,
+            );
           }
 
           const logEntry = {
