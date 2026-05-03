@@ -194,6 +194,25 @@ function stripLeadingEnvAssignments(cmd: string): string {
   return remaining;
 }
 
+function stripLeadingGitOptions(gitArgs: string): string {
+  let remaining = gitArgs.trim();
+  const argValue = /(?:"[^"]*"|'[^']*'|\S+)/;
+  while (remaining) {
+    const dashCMatch = remaining.match(new RegExp(`^-C\\s+${argValue.source}\\s+(.+)$`));
+    if (dashCMatch) {
+      remaining = dashCMatch[1]?.trim() || "";
+      continue;
+    }
+    const configMatch = remaining.match(new RegExp(`^-c\\s+${argValue.source}\\s+(.+)$`));
+    if (configMatch) {
+      remaining = configMatch[1]?.trim() || "";
+      continue;
+    }
+    return remaining;
+  }
+  return remaining;
+}
+
 /**
  * Fast deterministic evaluation of tool calls.
  * Returns a result if the rules engine can decide, or null to fall through to LLM.
@@ -247,8 +266,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
 
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");
-        const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
-        const effectiveGitCmd = dashCMatch?.[1] ?? gitArgs;
+        const effectiveGitCmd = stripLeadingGitOptions(gitArgs);
         if (/^rebase\s+--(continue|abort|quit)\b/.test(effectiveGitCmd)) continue;
         const sub = effectiveGitCmd.split(/\s+/)[0] || "";
         if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;

@@ -114,6 +114,12 @@ async function ensureServer(): Promise<boolean> {
   return waitForServer();
 }
 
+async function restartServer(): Promise<boolean> {
+  Bun.spawnSync(["tmux", "kill-session", "-t", TMUX_SESSION]);
+  startServer();
+  return waitForServer();
+}
+
 async function sendToServer(request: EvalRequest): Promise<EvalResponse> {
   const response = await fetch(`http://localhost${SOCKET_PATH}`, {
     method: "POST",
@@ -154,11 +160,22 @@ async function main() {
   try {
     console.error(`[mother] evaluating ${client}/${toolName || "request"}...`);
     const startTime = performance.now();
-    const response = await sendToServer(request);
-    const elapsed = performance.now() - startTime;
+    let response = await sendToServer(request);
+    let elapsed = performance.now() - startTime;
 
     if (response.type === "error") {
       console.error(`[mother] server error: ${response.message}`);
+      console.error(`[mother] restarting server and retrying once...`);
+      const restarted = await restartServer();
+      if (restarted) {
+        const retryStart = performance.now();
+        response = await sendToServer(request);
+        elapsed = performance.now() - retryStart;
+      }
+    }
+
+    if (response.type === "error") {
+      console.error(`[mother] server error after retry: ${response.message}`);
       console.error(`[mother] decision: ? PASSTHROUGH (server error)`);
       // Log the passthrough
       const logPath = `${import.meta.dir}/log.jsonl`;
@@ -225,6 +242,16 @@ async function main() {
 
           if (response.type === "error") {
             console.error(`[mother] server error on retry: ${response.message}`);
+            console.error(`[mother] restarting server and retrying once more...`);
+            const restarted = await restartServer();
+            if (restarted) {
+              const secondResponse = await sendToServer(request);
+              if (secondResponse.type !== "error") {
+                console.log(JSON.stringify(secondResponse.hookOutput || {}));
+                return;
+              }
+              console.error(`[mother] server error after restart: ${secondResponse.message}`);
+            }
             console.log(JSON.stringify({}));
             return;
           }

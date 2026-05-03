@@ -96,6 +96,18 @@ describe("Codex hook normalization", () => {
     });
   });
 
+  test("allows git rebase continue with git config flags", () => {
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "git -c core.editor=true rebase --continue" },
+    });
+
+    expect(evaluateDeterministic(stdin)).toEqual({
+      decision: "allow",
+      reason: "All command parts matched safe patterns",
+    });
+  });
+
   test("deterministic checks support cmd and still deny force pushes", () => {
     const stdin = JSON.stringify({
       tool_name: "exec_command",
@@ -167,4 +179,5 @@ describe("evaluator provider selection", () => {
     process.env.MOTHER_LLM_BACKEND = "local";
     expect(selectLlmBackend("claude")).toBe("local");
   });
+
 });

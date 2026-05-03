@@ -128,14 +128,14 @@ Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when 
 
 The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
 
-`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
+`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `@openai/codex-sdk`, using your logged-in Codex subscription. The SDK-backed evaluator runs in a read-only sandbox with approval policy `never` and disables `codex_hooks` through Codex config overrides to avoid recursive hook calls.
 
 ## LLM Backends
 
 Mother's analysis pipeline accepts any backend that can answer text prompts. Configure it with `MOTHER_LLM_BACKEND`:
 
 - `auto` (default): Codex requests use `codex-subscription`; Claude requests use `claude-subscription`.
-- `codex` / `codex-subscription`: uses `codex exec` and your logged-in Codex/ChatGPT subscription.
+- `codex` / `codex-subscription`: uses `@openai/codex-sdk` and your logged-in Codex/ChatGPT subscription.
 - `claude` / `claude-subscription`: uses Claude Code Agent SDK and your Claude Code subscription.
 - `anthropic-api`: uses Vercel AI SDK with `@ai-sdk/anthropic`; requires `ANTHROPIC_API_KEY`.
 - `openai-api`: uses `OPENAI_API_KEY` against an OpenAI-compatible `/v1/chat/completions` endpoint.
@@ -150,7 +150,7 @@ Model/backend environment variables:
 - `OPENAI_BASE_URL`: optional OpenAI-compatible API base URL for `openai-api`.
 - `MOTHER_LOCAL_BASE_URL`: local OpenAI-compatible base URL, default `http://localhost:11434/v1`.
 - `MOTHER_LOCAL_MODEL`: local model override.
-- `MOTHER_CODEX_MODEL`: optional model override for the nested `codex exec`.
+- `MOTHER_CODEX_MODEL`: optional model override for the SDK-backed Codex evaluator.
 - `MOTHER_CODEX_TIMEOUT_MS`: optional timeout, default `120000`.
 
 ## Security Preferences
