@@ -126,7 +126,7 @@ If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, 
 
 Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when the Codex process starts. Mother only receives `PermissionRequest` events, so sandbox-allowed tool calls can appear in Codex logs without corresponding Mother log entries. If Codex asks you directly for approval, check that the active config still includes `codex_hooks = true` and the `exec_command` matcher.
 
-The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
+The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. One daemon can handle Claude and Codex requests together: `mother-socket` sends the requested backend with each evaluation request, and the server selects the LLM backend per request. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
 
 `MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `@openai/codex-sdk`, using your logged-in Codex subscription. The SDK-backed evaluator runs in a read-only sandbox with approval policy `never` and disables `codex_hooks` through Codex config overrides to avoid recursive hook calls.
 
@@ -142,9 +142,12 @@ Mother's analysis pipeline accepts any backend that can answer text prompts. Con
 - `ai-gateway`: uses Vercel AI Gateway through `@ai-sdk/gateway`; requires the gateway's normal auth.
 - `local`: uses an OpenAI-compatible local endpoint, defaulting to `http://localhost:11434/v1`.
 
+With the socket CLI, `MOTHER_LLM_BACKEND` is request-scoped. For example, a Codex hook can run `MOTHER_LLM_BACKEND=codex ~/.bin/mother` while a Claude hook runs `MOTHER_LLM_BACKEND=claude ~/.bin/mother`; both talk to the same checkout daemon. If no request-specific backend is set, `auto` chooses by client. `MOTHER_SERVER_LLM_BACKEND` only sets the daemon's fallback default for requests that do not carry a backend.
+
 Model/backend environment variables:
 
 - `MOTHER_LLM_MODEL`: generic model override for API, gateway, and local modes.
+- `MOTHER_SERVER_LLM_BACKEND`: fallback backend for the socket daemon when a request does not specify `MOTHER_LLM_BACKEND`; defaults to `auto`.
 - `MOTHER_ANTHROPIC_MODEL`: Anthropic API model override.
 - `MOTHER_OPENAI_MODEL`: OpenAI API model override.
 - `OPENAI_BASE_URL`: optional OpenAI-compatible API base URL for `openai-api`.

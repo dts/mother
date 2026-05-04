@@ -41,6 +41,7 @@ export interface EvalRequest {
   hookEventName: string;
   permissionMode: string;
   toolName: string;
+  llmBackend?: string;
 }
 
 export interface EvalResponse {

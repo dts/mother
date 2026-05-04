@@ -16,7 +16,8 @@ import { type EvalRequest, type EvalResponse, readStdin, parseHookContext, findG
 const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
 const TMUX_SESSION = process.env.MOTHER_TMUX_SESSION || DEFAULT_INSTANCE_NAME;
 const PID_FILE = process.env.MOTHER_PID_FILE || DEFAULT_PID_FILE;
-const PROVIDER_MODE = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
+const REQUESTED_BACKEND = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
+const SERVER_BACKEND = process.env.MOTHER_SERVER_LLM_BACKEND || DEFAULT_PROVIDER_MODE;
 const SERVER_SCRIPT = `${import.meta.dir}/agent-server.ts`;
 
 async function fetchHealth(): Promise<any | null> {
@@ -46,6 +47,8 @@ async function checkStatus() {
     if (status.server_dir) console.log(`  Server dir: ${status.server_dir}`);
     if (status.socket_path) console.log(`  Socket: ${status.socket_path}`);
     if (status.provider_mode) console.log(`  Provider mode: ${status.provider_mode}`);
+    if (status.request_scoped_backends) console.log(`  Request-scoped backends: enabled`);
+    console.log(`  This request backend: ${REQUESTED_BACKEND}`);
     console.log(`  Uptime: ${status.uptime_seconds}s`);
     console.log(`  Requests: ${status.requests_handled}`);
     console.log(`  PID: ${status.pid}`);
@@ -76,7 +79,7 @@ function startServer(): void {
     `MOTHER_SOCKET=${SOCKET_PATH}`,
     `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
     `MOTHER_PID_FILE=${PID_FILE}`,
-    `MOTHER_LLM_BACKEND=${PROVIDER_MODE}`,
+    `MOTHER_LLM_BACKEND=${SERVER_BACKEND}`,
     "bun", SERVER_SCRIPT,
   ]);
 }
@@ -155,6 +158,7 @@ async function main() {
     hookEventName,
     permissionMode,
     toolName,
+    llmBackend: REQUESTED_BACKEND,
   };
 
   try {

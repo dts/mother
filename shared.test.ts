@@ -171,6 +171,13 @@ describe("evaluator provider selection", () => {
     expect(selectLlmBackend("claude")).toBe("codex-subscription");
   });
 
+  test("request-scoped provider override wins over daemon environment", () => {
+    process.env.MOTHER_LLM_BACKEND = "claude";
+    expect(selectLlmBackend("codex", "auto")).toBe("codex-subscription");
+    expect(selectLlmBackend("claude", "codex")).toBe("codex-subscription");
+    expect(selectLlmBackend("codex", "anthropic-api")).toBe("anthropic-api");
+  });
+
   test("supports API and local backends", () => {
     process.env.MOTHER_LLM_BACKEND = "anthropic-api";
     expect(selectLlmBackend("codex")).toBe("anthropic-api");

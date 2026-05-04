@@ -21,10 +21,18 @@ export interface LlmBackend {
 export interface LlmBackendContext {
   client: HookClient;
   cwd: string;
+  backendOverride?: string;
 }
 
-export function selectLlmBackend(client: HookClient): LlmBackendName {
-  const configured = (process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto").toLowerCase();
+export function selectLlmBackend(client: HookClient, backendOverride?: string): LlmBackendName {
+  const configured = (
+    backendOverride ||
+    process.env.MOTHER_LLM_BACKEND ||
+    process.env.MOTHER_EVAL_PROVIDER ||
+    process.env.MOTHER_PROVIDER ||
+    process.env.MOTHER_SERVER_LLM_BACKEND ||
+    "auto"
+  ).toLowerCase();
   if (configured === "auto") return client === "codex" ? "codex-subscription" : "claude-subscription";
   if (configured === "claude" || configured === "claude-code" || configured === "claude-sub") return "claude-subscription";
   if (configured === "codex" || configured === "chatgpt" || configured === "codex-sub") return "codex-subscription";
@@ -36,7 +44,7 @@ export function selectLlmBackend(client: HookClient): LlmBackendName {
 }
 
 export function createLlmBackend(context: LlmBackendContext): LlmBackend {
-  const backend = selectLlmBackend(context.client);
+  const backend = selectLlmBackend(context.client, context.backendOverride);
   switch (backend) {
     case "claude-subscription":
       return { name: backend, generateText: queryClaudeSubscription };

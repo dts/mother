@@ -67,7 +67,7 @@ function logRequest(req: EvalRequest) {
 }
 
 async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
-  const { args, stdin, cwd, client, hookEventName, permissionMode, toolName } = req;
+  const { args, stdin, cwd, client, hookEventName, permissionMode, toolName, llmBackend } = req;
   logRequest(req);
 
   // Pass-through tools Mother should never evaluate
@@ -125,8 +125,8 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
   const preferences = await loadPreferences(cwd, client);
 
   // Multi-pass LLM evaluation
-  const backend = createLlmBackend({ client, cwd });
-  log("EVAL", `evaluating request with ${selectLlmBackend(client)} backend...`);
+  const backend = createLlmBackend({ client, cwd, backendOverride: llmBackend });
+  log("EVAL", `evaluating request with ${selectLlmBackend(client, llmBackend)} backend...`);
   const result = await runAnalysisPipeline(backend, { args, stdin, cwd, client, toolName, preferences });
   log("TRIAGE", `score=${result.triage.promptInjectionScore} flags=[${result.triage.regexFlags.join(",")}]`);
   log("EVAL", `${result.explanation.summary}`);
@@ -208,7 +208,8 @@ async function startServer() {
           instance: DEFAULT_INSTANCE_NAME,
           server_dir: SERVER_DIR,
           socket_path: SOCKET_PATH,
-          provider_mode: process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto",
+          provider_mode: process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || process.env.MOTHER_SERVER_LLM_BACKEND || "auto",
+          request_scoped_backends: true,
           uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
           requests_handled: requestCount,
           pid: process.pid,
