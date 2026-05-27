@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runAnalysisPipeline } from "./analysis-pipeline";
+import { describeBranchSpecificScripts, runAnalysisPipeline } from "./analysis-pipeline";
 import type { LlmBackend } from "./llm-backends";
 
 describe("analysis pipeline", () => {
@@ -39,5 +39,15 @@ describe("analysis pipeline", () => {
     expect(result.explanation.summary).toBe("Runs tests.");
     expect(result.preferenceCheck.decision).toBe("allow");
     expect(result.preferenceCheck.matchedAllowedActions).toEqual(["Running tests"]);
+    expect(prompts[1]).toContain("Repository context:");
+    expect(prompts[2]).toContain("If the request could execute or rely on a script file");
+  });
+
+  test("reports when no upstream main/master ref is available", () => {
+    const tempDir = `/tmp/mother-no-upstream-${Date.now()}`;
+
+    expect(describeBranchSpecificScripts(tempDir)).toBe(
+      "Repository context: No local upstream main/master ref was found for branch comparison.",
+    );
   });
 });

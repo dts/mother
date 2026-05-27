@@ -96,15 +96,26 @@ Mother also understands Codex hook payloads. When the incoming payload looks lik
 - `PermissionRequest` allow -> Codex approval is granted
 - `PermissionRequest` deny -> Codex approval is rejected
 - `review`/`ask` -> Mother returns `{}` so Codex shows its normal approval prompt
+- `PreToolUse` deny -> Codex blocks the tool call before execution
+- `PreToolUse` allow/review -> Mother returns `{}` because Codex does not support `ask`/`approve` decisions for `PreToolUse`
 
 Add to `~/.codex/config.toml` or `<repo>/.codex/config.toml`:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|apply_patch|mcp__.*)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "MOTHER_LLM_BACKEND=codex ~/.bin/mother"
+timeout = 120
+statusMessage = "Checking tool request"
 
 [[hooks.PermissionRequest]]
-matcher = "^(Bash|exec_command|apply_patch|mcp__.*)$"
+matcher = "^(Bash|apply_patch|mcp__.*)$"
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
@@ -124,11 +135,13 @@ chmod +x ~/.bin/mother
 
 If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, no separate wrapper is needed.
 
-Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when the Codex process starts. Mother only receives `PermissionRequest` events, so sandbox-allowed tool calls can appear in Codex logs without corresponding Mother log entries. If Codex asks you directly for approval, check that the active config still includes `codex_hooks = true` and the `exec_command` matcher.
+Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when the Codex process starts. Open `/hooks` in the Codex TUI and trust the Mother hooks if Codex marks them as new or modified. Codex skips command hooks with `async = true`, so status hooks must either be synchronous or omitted.
+
+`PermissionRequest` only fires when Codex would ask for approval. `PreToolUse` fires before supported tool calls and lets Mother see sandbox-allowed operations too, but it can only block with `deny`; it cannot ask the user or approve on Codex's behalf.
 
 The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. One daemon can handle Claude and Codex requests together: `mother-socket` sends the requested backend with each evaluation request, and the server selects the LLM backend per request. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
 
-`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `@openai/codex-sdk`, using your logged-in Codex subscription. The SDK-backed evaluator runs in a read-only sandbox with approval policy `never` and disables `codex_hooks` through Codex config overrides to avoid recursive hook calls.
+`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `@openai/codex-sdk`, using your logged-in Codex subscription. The SDK-backed evaluator runs in a read-only sandbox with approval policy `never` and disables hooks through Codex config overrides to avoid recursive hook calls.
 
 ## LLM Backends
 
@@ -194,11 +207,12 @@ Edit `~/.claude/security-preferences.md` for global rules, or create `.claude/se
 Mother outputs JSON that Claude Code understands:
 
 ```json
-// For PreToolUse hooks
+// For PreToolUse hooks.
+// Mother only emits this object for denies; allow/review returns {}.
 {
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
-    "permissionDecision": "allow" | "deny" | "ask",
+    "permissionDecision": "deny",
     "permissionDecisionReason": "..."
   }
 }

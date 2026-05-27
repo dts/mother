@@ -87,12 +87,12 @@ async function queryCodexSubscription(prompt: string, cwd: string): Promise<stri
   const timeoutMs = Number(process.env.MOTHER_CODEX_TIMEOUT_MS || 120_000);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const codex = new Codex({
-    config: {
-      features: { codex_hooks: false },
-      approval_policy: "never",
-    },
-  });
+    const codex = new Codex({
+      config: {
+        features: { hooks: false },
+        approval_policy: "never",
+      },
+    });
   const thread = codex.startThread({
     workingDirectory: cwd,
     skipGitRepoCheck: true,

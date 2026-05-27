@@ -23,10 +23,21 @@ export interface AnalysisPipelineResult {
   denyMessage?: string;
 }
 
+const SCRIPT_PATH_PATTERN = /(^|\/)(?:scripts?|bin)\/|(?:\.(?:sh|bash|zsh|fish|py|rb|pl|php|js|jsx|ts|tsx|mjs|cjs))$/i;
+const UPSTREAM_BASE_CANDIDATES = [
+  "refs/remotes/upstream/main",
+  "refs/remotes/upstream/master",
+  "refs/remotes/origin/main",
+  "refs/remotes/origin/master",
+  "refs/heads/main",
+  "refs/heads/master",
+];
+
 export async function runAnalysisPipeline(
   backend: LlmBackend,
   input: AnalysisPipelineInput,
 ): Promise<AnalysisPipelineResult> {
+  const repoContext = describeBranchSpecificScripts(input.cwd);
   const triage = await runTriagePass(backend, input);
   if (triage.promptInjectionScore >= 60 || triage.regexFlags.length > 0) {
     return {
@@ -42,8 +53,8 @@ export async function runAnalysisPipeline(
     };
   }
 
-  const explanation = await runExplanationPass(backend, input);
-  const { preferenceCheck, denyMessage } = await runPreferencePass(backend, input, explanation);
+  const explanation = await runExplanationPass(backend, input, repoContext);
+  const { preferenceCheck, denyMessage } = await runPreferencePass(backend, input, explanation, repoContext);
   return { triage, explanation, preferenceCheck, denyMessage };
 }
 
@@ -84,7 +95,11 @@ REASONING: [one sentence explanation]`);
   };
 }
 
-async function runExplanationPass(backend: LlmBackend, input: AnalysisPipelineInput): Promise<Explanation> {
+async function runExplanationPass(
+  backend: LlmBackend,
+  input: AnalysisPipelineInput,
+  repoContext: string,
+): Promise<Explanation> {
   const text = await backend.generateText(`You are analyzing an AI tool permission request.
 
 Client: ${input.client}
@@ -96,6 +111,10 @@ Standard input content:
 <stdin>
 ${input.stdin.slice(0, 4000)}
 </stdin>
+
+${repoContext}
+
+If the request involves running, editing, or approving a script, especially one listed above as different from upstream main/master, prefer reading that file before you summarize the operation when your environment allows it.
 
 Explain what the requested operation would do. List affected files/directories if clear. Describe whether locations are inside the working directory, outside it, or unknown.
 
@@ -123,6 +142,7 @@ async function runPreferencePass(
   backend: LlmBackend,
   input: AnalysisPipelineInput,
   explanation: Explanation,
+  repoContext: string,
 ): Promise<{ preferenceCheck: PreferenceCheck; denyMessage?: string }> {
   const text = await backend.generateText(`You are a security policy evaluator for a developer's local machine.
 
@@ -139,6 +159,8 @@ Raw request:
 <request>
 ${input.stdin.slice(0, 4000)}
 </request>
+
+${repoContext}
 
 ${input.preferences ? `Additional preferences:\n<preferences>\n${input.preferences}\n</preferences>` : ""}
 
@@ -164,6 +186,8 @@ REVIEW if the action:
 - Changes system/user configuration
 - Performs remote network writes not explicitly allowed
 - Is not clearly safe or clearly forbidden
+
+If the request could execute or rely on a script file, especially one that differs from upstream main/master, prefer reading that script before deciding when your environment allows it. Do not assume the upstream version still reflects the branch behavior.
 
 Respond in this exact format:
 VIOLATED_RULES: [comma-separated rules, or none]
@@ -201,4 +225,60 @@ function parseList(value: string | undefined): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item && item.toLowerCase() !== "none");
+}
+
+export function describeBranchSpecificScripts(cwd: string): string {
+  const baseRef = resolveUpstreamBaseRef(cwd);
+  if (!baseRef) {
+    return "Repository context: No local upstream main/master ref was found for branch comparison.";
+  }
+
+  const mergeBase = runGit(cwd, ["merge-base", "HEAD", baseRef]);
+  if (!mergeBase) {
+    return `Repository context: Could not determine a merge-base against ${baseRef}.`;
+  }
+
+  const diffOutput = runGit(cwd, ["diff", "--name-only", `${mergeBase}..HEAD`]);
+  if (!diffOutput) {
+    return `Repository context: No files differ from ${baseRef} on the current branch.`;
+  }
+
+  const scriptPaths = diffOutput
+    .split("\n")
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0)
+    .filter(isScriptLikePath);
+
+  if (scriptPaths.length === 0) {
+    return `Repository context: No changed script-like files were found compared with ${baseRef}.`;
+  }
+
+  const listedPaths = scriptPaths.slice(0, 20).join(", ");
+  const truncated = scriptPaths.length > 20 ? `, and ${scriptPaths.length - 20} more` : "";
+  return [
+    `Repository context: Changed script-like files on this branch compared with ${baseRef}: ${listedPaths}${truncated}.`,
+    "These files may behave differently from upstream main/master.",
+  ].join("\n");
+}
+
+function resolveUpstreamBaseRef(cwd: string): string | null {
+  for (const ref of UPSTREAM_BASE_CANDIDATES) {
+    if (runGit(cwd, ["rev-parse", "--verify", ref])) return ref;
+  }
+  return null;
+}
+
+function runGit(cwd: string, args: string[]): string | null {
+  try {
+    const result = Bun.spawnSync(["git", ...args], { cwd, stderr: "ignore" });
+    if (result.exitCode !== 0) return null;
+    const output = result.stdout.toString().trim();
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+function isScriptLikePath(path: string): boolean {
+  return SCRIPT_PATH_PATTERN.test(path);
 }
