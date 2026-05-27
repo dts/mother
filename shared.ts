@@ -37,9 +37,11 @@ export interface EvalRequest {
   args: string[];
   stdin: string;
   cwd: string;
+  client: HookClient;
   hookEventName: string;
   permissionMode: string;
   toolName: string;
+  llmBackend?: string;
 }
 
 export interface EvalResponse {
@@ -71,8 +73,9 @@ export const SUSPICIOUS_PATTERNS = [
 ];
 
 export const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoRead"];
-export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+export const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "apply_patch"];
 export const PASSTHROUGH_TOOLS = ["AskUserQuestion"];
+export type HookClient = "claude" | "codex";
 
 // --- Deterministic Rules Engine ---
 
@@ -86,26 +89,23 @@ const SAFE_MCP_PREFIXES = [
   "mcp__asana__", "mcp__notion__", "mcp__figma__", "mcp__slack__", "mcp__datadog-api-claude-plugin__",
 ];
 
-const SAFE_BASH_PREFIXES = [
-  "ls", "pwd", "which", "wc", "head", "tail", "cat", "echo", "find", "grep", "rg",
-  "make", "pnpm", "npm", "yarn", "node", "npx", "bun", "docker", "open", "afplay",
-  "osascript", "curl", "mkdir", "cp", "mv", "pup", "sleep",
-];
-
-const SAFE_GIT_SUBCOMMANDS = new Set([
-  "status", "diff", "log", "show", "branch", "fetch", "rev-parse", "merge-base",
-  "stash", "remote", "tag", "describe", "shortlog", "reflog", "ls-files", "ls-tree",
-  "name-rev", "for-each-ref",
+const SAFE_READ_ONLY_BASH_PREFIXES = new Set([
+  "ls", "pwd", "which", "wc", "head", "tail", "cat", "grep", "rg",
 ]);
 
-const SAFE_GIT_WRITE_SUBCOMMANDS = new Set(["add", "commit", "checkout", "switch", "worktree", "gtr"]);
+const SECRET_PATH_PATTERN = /(^|[\/\s'"`])(\.env(\.|$)|credentials|secrets?|.*\.pem\b|id_rsa\b|id_ed25519\b|\.npmrc\b|\.pypirc\b|\.netrc\b)/i;
+const SHELL_EXPANSION_OR_REDIRECTION = /[|<>`]|\$\(/;
+
+const SAFE_GIT_READ_ONLY_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "rev-parse", "merge-base",
+  "describe", "shortlog", "reflog", "ls-files", "ls-tree",
+  "name-rev", "for-each-ref",
+]);
 
 interface DenyPattern { test: (cmd: string) => boolean; reason: string; }
 interface ReviewPattern { test: (cmd: string) => boolean; reason: string; }
 
 const HARD_DENY_PATTERNS: DenyPattern[] = [
-  { test: (cmd) => /git\s+commit\s+.*--amend/.test(cmd),
-    reason: "NEVER amend commits — always create new commits." },
   { test: (cmd) => /git\s+push\s+.*--force/.test(cmd),
     reason: "Force push is ALWAYS blocked." },
   { test: (cmd) => /git\s+push\s+.*--force-with-lease/.test(cmd),
@@ -172,6 +172,84 @@ function getFirstWord(cmd: string): string {
   return parts[0] || "";
 }
 
+export function normalizeToolName(toolName: string): string {
+  if (toolName === "exec_command") return "Bash";
+  return toolName;
+}
+
+export function getToolCommand(toolInput: Record<string, unknown>): string | null {
+  if (typeof toolInput.command === "string") return toolInput.command;
+  if (typeof toolInput.cmd === "string") return toolInput.cmd;
+  return null;
+}
+
+function stripLeadingEnvAssignments(cmd: string): string {
+  let remaining = cmd.trim();
+  if (remaining.startsWith("env ")) {
+    remaining = remaining.replace(/^env\s+/, "").trim();
+  }
+  while (/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/.test(remaining)) {
+    remaining = remaining.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/, "").trim();
+  }
+  return remaining;
+}
+
+function stripLeadingGitOptions(gitArgs: string): string {
+  let remaining = gitArgs.trim();
+  const argValue = /(?:"[^"]*"|'[^']*'|\S+)/;
+  while (remaining) {
+    const dashCMatch = remaining.match(new RegExp(`^-C\\s+${argValue.source}\\s+(.+)$`));
+    if (dashCMatch) {
+      remaining = dashCMatch[1]?.trim() || "";
+      continue;
+    }
+    const configMatch = remaining.match(new RegExp(`^-c\\s+${argValue.source}\\s+(.+)$`));
+    if (configMatch) {
+      remaining = configMatch[1]?.trim() || "";
+      continue;
+    }
+    return remaining;
+  }
+  return remaining;
+}
+
+function isReadOnlyBashCommand(cmd: string): boolean {
+  if (SHELL_EXPANSION_OR_REDIRECTION.test(cmd)) return false;
+  if (SECRET_PATH_PATTERN.test(cmd)) return false;
+
+  const firstWord = getFirstWord(cmd);
+  if (SAFE_READ_ONLY_BASH_PREFIXES.has(firstWord)) return true;
+
+  if (firstWord === "find") {
+    return !/\s-(delete|exec|execdir|ok|okdir|fprint|fprintf)\b/.test(cmd);
+  }
+
+  if (firstWord === "sleep") {
+    const match = cmd.match(/^sleep\s+([0-9]+(?:\.[0-9]+)?)(s)?\s*$/);
+    return !!match && Number(match[1]) <= 10;
+  }
+
+  return false;
+}
+
+function isAllowedProjectCheckCommand(cmd: string): boolean {
+  if (SHELL_EXPANSION_OR_REDIRECTION.test(cmd)) return false;
+  if (SECRET_PATH_PATTERN.test(cmd)) return false;
+
+  return /^make\s+review\s*$/.test(cmd) || /^pnpm\s+test(?:\s|$)/.test(cmd);
+}
+
+function isAllowedGitCommand(effectiveGitCmd: string): boolean {
+  if (/^rebase\s+--(continue|abort|quit)\b/.test(effectiveGitCmd)) return true;
+  if (/^commit\b/.test(effectiveGitCmd)) return true;
+  if (/^branch\s*(-[avv-]+)?\s*$/.test(effectiveGitCmd)) return true;
+  if (/^remote\s+(-v|show\b|get-url\b)/.test(effectiveGitCmd)) return true;
+  if (/^tag(?:\s+(?:-l|--list)(?:\s+\S+)?)?\s*$/.test(effectiveGitCmd)) return true;
+
+  const sub = effectiveGitCmd.split(/\s+/)[0] || "";
+  return SAFE_GIT_READ_ONLY_SUBCOMMANDS.has(sub);
+}
+
 /**
  * Fast deterministic evaluation of tool calls.
  * Returns a result if the rules engine can decide, or null to fall through to LLM.
@@ -181,7 +259,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
   let toolInput: Record<string, unknown>;
   try {
     const parsed = JSON.parse(stdinContent);
-    toolName = parsed.tool_name || "";
+    toolName = normalizeToolName(parsed.tool_name || parsed.toolName || "");
     toolInput = parsed.tool_input || {};
   } catch {
     return null;
@@ -196,12 +274,12 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
     return { decision: "allow", reason: "Safe MCP tool" };
 
   // File write/edit — always allow (mode logic applied later)
-  if (toolName === "Write" || toolName === "Edit")
+  if (toolName === "Write" || toolName === "Edit" || toolName === "apply_patch")
     return { decision: "allow", reason: "File write/edit allowed" };
 
   // Bash commands — full deterministic evaluation
   if (toolName === "Bash") {
-    const cmd = typeof toolInput.command === "string" ? toolInput.command.trim() : null;
+    const cmd = getToolCommand(toolInput)?.trim() || null;
     if (!cmd) return { decision: "ask", reason: "Empty bash command" };
 
     // Hard deny patterns
@@ -217,18 +295,17 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
     // Check each part of compound commands
     const parts = cmd.split(/\s*(?:&&|\|\||;)\s*/);
     for (const part of parts) {
-      const trimmed = part.trim();
+      const trimmed = stripLeadingEnvAssignments(part);
       if (!trimmed) continue;
       const firstWord = getFirstWord(trimmed);
 
-      if (SAFE_BASH_PREFIXES.some((p) => firstWord === p)) continue;
+      if (isReadOnlyBashCommand(trimmed)) continue;
+      if (isAllowedProjectCheckCommand(trimmed)) continue;
 
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");
-        const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
-        const effectiveGitCmd = dashCMatch ? dashCMatch[1] : gitArgs;
-        const sub = effectiveGitCmd.split(/\s+/)[0] || "";
-        if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;
+        const effectiveGitCmd = stripLeadingGitOptions(gitArgs);
+        if (isAllowedGitCommand(effectiveGitCmd)) continue;
         return null; // unknown git subcommand → LLM
       }
 
@@ -354,17 +431,29 @@ export function buildHookOutput(
     return {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
-        decision: {
-          behavior: decision,
-          message: reason,
-        },
+        decision: decision === "deny"
+          ? { behavior: decision, message: reason }
+          : { behavior: decision },
+      },
+    };
+  }
+
+  if (hookEventName === "PreToolUse") {
+    if (decision !== "deny") {
+      return {};
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
       },
     };
   }
 
   return {
     hookSpecificOutput: {
-      hookEventName: "PreToolUse",
+      hookEventName,
       permissionDecision: decision,
       permissionDecisionReason: reason,
     },
@@ -390,11 +479,13 @@ export async function readStdin(): Promise<string> {
 }
 
 export function parseHookContext(stdinContent: string): {
+  client: HookClient;
   hookEventName: string;
   permissionMode: string;
   toolName: string;
   cwd: string;
 } {
+  let client: HookClient = "claude";
   let hookEventName = "PreToolUse";
   let permissionMode = "default";
   let toolName = "";
@@ -402,21 +493,40 @@ export function parseHookContext(stdinContent: string): {
 
   try {
     const parsed = JSON.parse(stdinContent);
-    hookEventName = parsed.hook_event_name || "PreToolUse";
-    const rawMode = parsed.permission_mode || "default";
+    const rawToolName = parsed.tool_name || parsed.toolName || "";
+    toolName = normalizeToolName(rawToolName);
+
+    const explicitClient = String(parsed.client || parsed.hook_client || parsed.source_client || "").toLowerCase();
+    const hasClaudeOnlyFields = parsed.permission_mode !== undefined || parsed.transcript_path !== undefined;
+    const hasCodexOnlyFields =
+      parsed.turn_id !== undefined ||
+      parsed.tool_input?.description !== undefined ||
+      rawToolName === "exec_command" ||
+      toolName === "apply_patch";
+    if (explicitClient === "codex" || (!hasClaudeOnlyFields && hasCodexOnlyFields)) {
+      client = "codex";
+    }
+
+    hookEventName =
+      parsed.hook_event_name ||
+      parsed.hookEventName ||
+      (client === "codex" && toolName ? "PermissionRequest" : "PreToolUse");
+
+    const rawMode = parsed.permission_mode || parsed.permissionMode || (client === "codex" ? "codex" : "default");
     if (rawMode === "plan" || rawMode === "planMode") {
       permissionMode = "plan";
     } else if (rawMode === "acceptEdits" || rawMode === "acceptAllEdits") {
       permissionMode = "acceptEdits";
+    } else if (rawMode === "codex") {
+      permissionMode = "codex";
     } else {
       permissionMode = "default";
     }
-    toolName = parsed.tool_name || "";
     cwd = parsed.cwd || cwd;
   } catch {
     // Not JSON, use defaults
   }
-  return { hookEventName, permissionMode, toolName, cwd };
+  return { client, hookEventName, permissionMode, toolName, cwd };
 }
 
 export function findGitRoot(cwd: string): string {
@@ -431,17 +541,21 @@ export function findGitRoot(cwd: string): string {
   return cwd;
 }
 
-export async function loadPreferences(cwd: string): Promise<string> {
+export async function loadPreferences(cwd: string, client: HookClient = "claude"): Promise<string> {
   const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
-  try {
-    return await readFile(`${cwd}/.claude/security-preferences.md`, "utf-8");
-  } catch {
+  const codexCandidates = [`${cwd}/.codex/security-preferences.md`, `${homeDir}/.codex/security-preferences.md`];
+  const claudeCandidates = [`${cwd}/.claude/security-preferences.md`, `${homeDir}/.claude/security-preferences.md`];
+  const candidates = client === "codex"
+    ? [...codexCandidates, ...claudeCandidates]
+    : [...claudeCandidates, ...codexCandidates];
+  for (const candidate of candidates) {
     try {
-      return await readFile(`${homeDir}/.claude/security-preferences.md`, "utf-8");
+      return await readFile(candidate, "utf-8");
     } catch {
-      return "";
+      // Try the next preference location.
     }
   }
+  return "";
 }
 
 /**
@@ -455,10 +569,15 @@ export function extractPathsFromStdin(stdin: string): string[] {
     const paths: string[] = [];
     if (input.file_path) paths.push(input.file_path);
     if (input.path) paths.push(input.path);
-    if (input.command) {
+    const command = getToolCommand(input);
+    if (command) {
       // Extract paths from bash commands (best effort)
-      const matches = input.command.match(/(?:^|\s)(\/\S+|\.\/\S+|\.\.\S+)/g);
+      const matches = command.match(/(?:^|\s)(\/\S+|\.\/\S+|\.\.\S+)/g);
       if (matches) paths.push(...matches.map((m: string) => m.trim()));
+
+      // Extract paths from apply_patch payloads.
+      const patchPathMatches = [...command.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s+(.+)$/gm)];
+      paths.push(...patchPathMatches.map((match) => match[1]?.trim()).filter((path): path is string => !!path));
     }
     return paths;
   } catch {
@@ -470,6 +589,7 @@ export function extractPathsFromStdin(stdin: string): string[] {
  * Apply mode-specific logic to map a policy decision to a final hook decision.
  *
  * - acceptEdits: review → allow (user opted into autonomy)
+ * - codex: allow/deny/review map directly to allow/deny/ask for PermissionRequest
  * - plan: reads/investigation → allow, real code writes → deny, plan doc writes → allow
  * - default: write-tool allow → ask (conservative)
  */
@@ -487,6 +607,10 @@ export function applyModeLogic(
 
   const isReadOnly = READ_ONLY_TOOLS.includes(toolName);
   const isWrite = WRITE_TOOLS.includes(toolName);
+
+  if (permissionMode === "codex") {
+    return { decision: finalDecision };
+  }
 
   if (permissionMode === "plan" || permissionMode === "planMode") {
     if (toolName === "ExitPlanMode") {
@@ -608,8 +732,14 @@ export function earlyBashCheck(
   permissionMode: string,
   stdinContent: string,
 ): object | null {
-  const commandMatch = stdinContent.match(/"command"\s*:\s*"([^"]+)"/);
-  const command = commandMatch?.[1] || "";
+  let command = "";
+  try {
+    const parsed = JSON.parse(stdinContent);
+    command = getToolCommand(parsed.tool_input || {}) || "";
+  } catch {
+    const commandMatch = stdinContent.match(/"(?:command|cmd)"\s*:\s*"([^"]+)"/);
+    command = commandMatch?.[1] || "";
+  }
 
   // Deny xargs in acceptEdits mode
   if (permissionMode === "acceptEdits" && command.includes("xargs")) {
