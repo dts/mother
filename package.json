@@ -6,7 +6,7 @@
     "start:agent": "bun cli-agent.ts",
     "start:socket": "bun cli-socket.ts",
     "server": "bun agent-server.ts",
-    "server:codex": "MOTHER_LLM_BACKEND=codex bun agent-server.ts",
+    "server:codex": "MOTHER_SERVER_LLM_BACKEND=codex bun agent-server.ts",
     "server:stop": "bun agent-server.ts stop",
     "server:status": "bun cli-socket.ts status",
     "eval": "bun eval.ts"
@@ -21,6 +21,7 @@
     "@ai-sdk/anthropic": "^3.0.58",
     "@ai-sdk/gateway": "^3.0.66",
     "@anthropic-ai/claude-agent-sdk": "^0.2.76",
+    "@openai/codex-sdk": "^0.128.0",
     "ai": "^6.0.116"
   }
 }

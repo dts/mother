@@ -17,7 +17,8 @@ import { notifyMuster } from "./muster";
 const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
 const TMUX_SESSION = process.env.MOTHER_TMUX_SESSION || DEFAULT_INSTANCE_NAME;
 const PID_FILE = process.env.MOTHER_PID_FILE || DEFAULT_PID_FILE;
-const PROVIDER_MODE = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
+const REQUESTED_BACKEND = process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || DEFAULT_PROVIDER_MODE;
+const SERVER_BACKEND = process.env.MOTHER_SERVER_LLM_BACKEND || DEFAULT_PROVIDER_MODE;
 const SERVER_SCRIPT = `${import.meta.dir}/agent-server.ts`;
 
 async function fetchHealth(): Promise<any | null> {
@@ -47,6 +48,8 @@ async function checkStatus() {
     if (status.server_dir) console.log(`  Server dir: ${status.server_dir}`);
     if (status.socket_path) console.log(`  Socket: ${status.socket_path}`);
     if (status.provider_mode) console.log(`  Provider mode: ${status.provider_mode}`);
+    if (status.request_scoped_backends) console.log(`  Request-scoped backends: enabled`);
+    console.log(`  This request backend: ${REQUESTED_BACKEND}`);
     console.log(`  Uptime: ${status.uptime_seconds}s`);
     console.log(`  Requests: ${status.requests_handled}`);
     console.log(`  PID: ${status.pid}`);
@@ -71,14 +74,14 @@ function isServerRunning(): boolean {
 }
 
 function startServer(): void {
+  // Use a restart loop so the daemon auto-recovers if Bun crashes
+  const restartLoop = [
+    "bash", "-c",
+    `while true; do env MOTHER_SOCKET=${SOCKET_PATH} MOTHER_TMUX_SESSION=${TMUX_SESSION} MOTHER_PID_FILE=${PID_FILE} MOTHER_LLM_BACKEND=${SERVER_BACKEND} bun ${SERVER_SCRIPT}; echo "[mother] server exited, restarting in 1s..."; sleep 1; done`,
+  ];
   Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", TMUX_SESSION,
-    "env",
-    `MOTHER_SOCKET=${SOCKET_PATH}`,
-    `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
-    `MOTHER_PID_FILE=${PID_FILE}`,
-    `MOTHER_LLM_BACKEND=${PROVIDER_MODE}`,
-    "bun", SERVER_SCRIPT,
+    ...restartLoop,
   ]);
 }
 
@@ -112,6 +115,12 @@ async function ensureServer(): Promise<boolean> {
     startServer();
   }
 
+  return waitForServer();
+}
+
+async function restartServer(): Promise<boolean> {
+  Bun.spawnSync(["tmux", "kill-session", "-t", TMUX_SESSION]);
+  startServer();
   return waitForServer();
 }
 
@@ -153,16 +162,28 @@ async function main() {
     hookEventName,
     permissionMode,
     toolName,
+    llmBackend: REQUESTED_BACKEND,
   };
 
   try {
     console.error(`[mother] evaluating ${client}/${toolName || "request"}...`);
     const startTime = performance.now();
-    const response = await sendToServer(request);
-    const elapsed = performance.now() - startTime;
+    let response = await sendToServer(request);
+    let elapsed = performance.now() - startTime;
 
     if (response.type === "error") {
       console.error(`[mother] server error: ${response.message}`);
+      console.error(`[mother] restarting server and retrying once...`);
+      const restarted = await restartServer();
+      if (restarted) {
+        const retryStart = performance.now();
+        response = await sendToServer(request);
+        elapsed = performance.now() - retryStart;
+      }
+    }
+
+    if (response.type === "error") {
+      console.error(`[mother] server error after retry: ${response.message}`);
       console.error(`[mother] decision: ? PASSTHROUGH (server error)`);
       // Log the passthrough
       const logPath = `${import.meta.dir}/log.jsonl`;
@@ -228,6 +249,16 @@ async function main() {
 
           if (response.type === "error") {
             console.error(`[mother] server error on retry: ${response.message}`);
+            console.error(`[mother] restarting server and retrying once more...`);
+            const restarted = await restartServer();
+            if (restarted) {
+              const secondResponse = await sendToServer(request);
+              if (secondResponse.type !== "error") {
+                console.log(JSON.stringify(secondResponse.hookOutput || {}));
+                return;
+              }
+              console.error(`[mother] server error after restart: ${secondResponse.message}`);
+            }
             console.log(JSON.stringify({}));
             return;
           }

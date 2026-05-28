@@ -96,15 +96,26 @@ Mother also understands Codex hook payloads. When the incoming payload looks lik
 - `PermissionRequest` allow -> Codex approval is granted
 - `PermissionRequest` deny -> Codex approval is rejected
 - `review`/`ask` -> Mother returns `{}` so Codex shows its normal approval prompt
+- `PreToolUse` deny -> Codex blocks the tool call before execution
+- `PreToolUse` allow/review -> Mother returns `{}` because Codex does not support `ask`/`approve` decisions for `PreToolUse`
 
 Add to `~/.codex/config.toml` or `<repo>/.codex/config.toml`:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|apply_patch|mcp__.*)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "MOTHER_LLM_BACKEND=codex ~/.bin/mother"
+timeout = 120
+statusMessage = "Checking tool request"
 
 [[hooks.PermissionRequest]]
-matcher = "^(Bash|exec_command|apply_patch|mcp__.*)$"
+matcher = "^(Bash|apply_patch|mcp__.*)$"
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
@@ -124,31 +135,38 @@ chmod +x ~/.bin/mother
 
 If your existing `~/.bin/mother` already points at the correct `cli-socket.ts`, no separate wrapper is needed.
 
-The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
+Restart Codex after changing `~/.codex/config.toml`; hook config is loaded when the Codex process starts. Open `/hooks` in the Codex TUI and trust the Mother hooks if Codex marks them as new or modified. Codex skips command hooks with `async = true`, so status hooks must either be synchronous or omitted.
 
-`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `codex exec`, using your logged-in Codex subscription. The server passes `--ignore-user-config`, `--ignore-rules`, `--disable codex_hooks`, `--ask-for-approval never`, and `--sandbox read-only` to the nested Codex evaluator so it does not recursively trigger Mother hooks or mutate your project.
+`PermissionRequest` only fires when Codex would ask for approval. `PreToolUse` fires before supported tool calls and lets Mother see sandbox-allowed operations too, but it can only block with `deny`; it cannot ask the user or approve on Codex's behalf.
+
+The socket daemon uses a checkout-specific default instance name and socket path, so two Mother checkouts do not fight over `/tmp/mother.sock` or the same tmux session. One daemon can handle Claude and Codex requests together: `mother-socket` sends the requested backend with each evaluation request, and the server selects the LLM backend per request. Override `MOTHER_SOCKET` or `MOTHER_TMUX_SESSION` only if you intentionally want a shared daemon identity.
+
+`MOTHER_LLM_BACKEND=codex` makes the Mother server evaluate ambiguous requests with `@openai/codex-sdk`, using your logged-in Codex subscription. The SDK-backed evaluator runs in a read-only sandbox with approval policy `never` and disables hooks through Codex config overrides to avoid recursive hook calls.
 
 ## LLM Backends
 
 Mother's analysis pipeline accepts any backend that can answer text prompts. Configure it with `MOTHER_LLM_BACKEND`:
 
 - `auto` (default): Codex requests use `codex-subscription`; Claude requests use `claude-subscription`.
-- `codex` / `codex-subscription`: uses `codex exec` and your logged-in Codex/ChatGPT subscription.
+- `codex` / `codex-subscription`: uses `@openai/codex-sdk` and your logged-in Codex/ChatGPT subscription.
 - `claude` / `claude-subscription`: uses Claude Code Agent SDK and your Claude Code subscription.
 - `anthropic-api`: uses Vercel AI SDK with `@ai-sdk/anthropic`; requires `ANTHROPIC_API_KEY`.
 - `openai-api`: uses `OPENAI_API_KEY` against an OpenAI-compatible `/v1/chat/completions` endpoint.
 - `ai-gateway`: uses Vercel AI Gateway through `@ai-sdk/gateway`; requires the gateway's normal auth.
 - `local`: uses an OpenAI-compatible local endpoint, defaulting to `http://localhost:11434/v1`.
 
+With the socket CLI, `MOTHER_LLM_BACKEND` is request-scoped. For example, a Codex hook can run `MOTHER_LLM_BACKEND=codex ~/.bin/mother` while a Claude hook runs `MOTHER_LLM_BACKEND=claude ~/.bin/mother`; both talk to the same checkout daemon. If no request-specific backend is set, `auto` chooses by client. `MOTHER_SERVER_LLM_BACKEND` only sets the daemon's fallback default for requests that do not carry a backend.
+
 Model/backend environment variables:
 
 - `MOTHER_LLM_MODEL`: generic model override for API, gateway, and local modes.
+- `MOTHER_SERVER_LLM_BACKEND`: fallback backend for the socket daemon when a request does not specify `MOTHER_LLM_BACKEND`; defaults to `auto`.
 - `MOTHER_ANTHROPIC_MODEL`: Anthropic API model override.
 - `MOTHER_OPENAI_MODEL`: OpenAI API model override.
 - `OPENAI_BASE_URL`: optional OpenAI-compatible API base URL for `openai-api`.
 - `MOTHER_LOCAL_BASE_URL`: local OpenAI-compatible base URL, default `http://localhost:11434/v1`.
 - `MOTHER_LOCAL_MODEL`: local model override.
-- `MOTHER_CODEX_MODEL`: optional model override for the nested `codex exec`.
+- `MOTHER_CODEX_MODEL`: optional model override for the SDK-backed Codex evaluator.
 - `MOTHER_CODEX_TIMEOUT_MS`: optional timeout, default `120000`.
 
 ## Security Preferences
@@ -189,11 +207,12 @@ Edit `~/.claude/security-preferences.md` for global rules, or create `.claude/se
 Mother outputs JSON that Claude Code understands:
 
 ```json
-// For PreToolUse hooks
+// For PreToolUse hooks.
+// Mother only emits this object for denies; allow/review returns {}.
 {
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
-    "permissionDecision": "allow" | "deny" | "ask",
+    "permissionDecision": "deny",
     "permissionDecisionReason": "..."
   }
 }

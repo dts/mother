@@ -1,8 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { gateway } from "@ai-sdk/gateway";
+import { Codex } from "@openai/codex-sdk";
 import { generateText } from "ai";
-import { readFile, unlink } from "fs/promises";
 import type { HookClient } from "./shared";
 
 export type LlmBackendName =
@@ -21,10 +21,18 @@ export interface LlmBackend {
 export interface LlmBackendContext {
   client: HookClient;
   cwd: string;
+  backendOverride?: string;
 }
 
-export function selectLlmBackend(client: HookClient): LlmBackendName {
-  const configured = (process.env.MOTHER_LLM_BACKEND || process.env.MOTHER_EVAL_PROVIDER || process.env.MOTHER_PROVIDER || "auto").toLowerCase();
+export function selectLlmBackend(client: HookClient, backendOverride?: string): LlmBackendName {
+  const configured = (
+    backendOverride ||
+    process.env.MOTHER_LLM_BACKEND ||
+    process.env.MOTHER_EVAL_PROVIDER ||
+    process.env.MOTHER_PROVIDER ||
+    process.env.MOTHER_SERVER_LLM_BACKEND ||
+    "auto"
+  ).toLowerCase();
   if (configured === "auto") return client === "codex" ? "codex-subscription" : "claude-subscription";
   if (configured === "claude" || configured === "claude-code" || configured === "claude-sub") return "claude-subscription";
   if (configured === "codex" || configured === "chatgpt" || configured === "codex-sub") return "codex-subscription";
@@ -36,7 +44,7 @@ export function selectLlmBackend(client: HookClient): LlmBackendName {
 }
 
 export function createLlmBackend(context: LlmBackendContext): LlmBackend {
-  const backend = selectLlmBackend(context.client);
+  const backend = selectLlmBackend(context.client, context.backendOverride);
   switch (backend) {
     case "claude-subscription":
       return { name: backend, generateText: queryClaudeSubscription };
@@ -76,58 +84,32 @@ export async function queryClaudeSubscription(prompt: string): Promise<string> {
 }
 
 async function queryCodexSubscription(prompt: string, cwd: string): Promise<string> {
-  const outputPath = `/tmp/mother-codex-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
   const timeoutMs = Number(process.env.MOTHER_CODEX_TIMEOUT_MS || 120_000);
-  const modelArgs = process.env.MOTHER_CODEX_MODEL ? ["--model", process.env.MOTHER_CODEX_MODEL] : [];
-
-  const proc = Bun.spawn([
-    "codex",
-    "exec",
-    "--ask-for-approval", "never",
-    "--sandbox", "read-only",
-    "--skip-git-repo-check",
-    "--ephemeral",
-    "--ignore-user-config",
-    "--ignore-rules",
-    "--disable", "codex_hooks",
-    "--color", "never",
-    "--output-last-message", outputPath,
-    ...modelArgs,
-    "-",
-  ], {
-    cwd,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, NO_COLOR: "1" },
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const codex = new Codex({
+      config: {
+        features: { hooks: false },
+        approval_policy: "never",
+      },
+    });
+  const thread = codex.startThread({
+    workingDirectory: cwd,
+    skipGitRepoCheck: true,
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    model: process.env.MOTHER_CODEX_MODEL,
+    webSearchMode: "disabled",
   });
-
-  proc.stdin.write(prompt);
-  proc.stdin.end();
-
-  const timedOut = Symbol("timedOut");
-  const timeout = new Promise<typeof timedOut>((resolve) => {
-    setTimeout(() => {
-      proc.kill();
-      resolve(timedOut);
-    }, timeoutMs);
-  });
-
-  const [exitCode, stdoutText, stderrText] = await Promise.all([
-    Promise.race([proc.exited, timeout]),
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
 
   try {
-    if (exitCode === timedOut) throw new Error(`codex exec timed out after ${timeoutMs}ms`);
-    if (exitCode !== 0) {
-      const stderrSummary = stderrText.trim().split("\n").slice(-3).join("\n");
-      throw new Error(`codex exec exited ${exitCode}${stderrSummary ? `: ${stderrSummary}` : ""}`);
-    }
-    return (await readFile(outputPath, "utf-8").catch(() => stdoutText)).trim();
+    const turn = await thread.run(prompt, { signal: controller.signal });
+    return turn.finalResponse.trim();
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`Codex SDK timed out after ${timeoutMs}ms`);
+    throw error;
   } finally {
-    await unlink(outputPath).catch(() => {});
+    clearTimeout(timeout);
   }
 }
 

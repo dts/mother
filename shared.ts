@@ -41,6 +41,7 @@ export interface EvalRequest {
   hookEventName: string;
   permissionMode: string;
   toolName: string;
+  llmBackend?: string;
 }
 
 export interface EvalResponse {
@@ -88,19 +89,18 @@ const SAFE_MCP_PREFIXES = [
   "mcp__asana__", "mcp__notion__", "mcp__figma__", "mcp__slack__", "mcp__datadog-api-claude-plugin__",
 ];
 
-const SAFE_BASH_PREFIXES = [
-  "ls", "pwd", "which", "wc", "head", "tail", "cat", "echo", "find", "grep", "rg",
-  "make", "pnpm", "npm", "yarn", "node", "npx", "bun", "docker", "open", "afplay",
-  "osascript", "curl", "mkdir", "cp", "mv", "pup", "sleep",
-];
-
-const SAFE_GIT_SUBCOMMANDS = new Set([
-  "status", "diff", "log", "show", "branch", "fetch", "rev-parse", "merge-base",
-  "stash", "remote", "tag", "describe", "shortlog", "reflog", "ls-files", "ls-tree",
-  "name-rev", "for-each-ref",
+const SAFE_READ_ONLY_BASH_PREFIXES = new Set([
+  "ls", "pwd", "which", "wc", "head", "tail", "cat", "grep", "rg",
 ]);
 
-const SAFE_GIT_WRITE_SUBCOMMANDS = new Set(["add", "commit", "checkout", "switch", "worktree", "gtr"]);
+const SECRET_PATH_PATTERN = /(^|[\/\s'"`])(\.env(\.|$)|credentials|secrets?|.*\.pem\b|id_rsa\b|id_ed25519\b|\.npmrc\b|\.pypirc\b|\.netrc\b)/i;
+const SHELL_EXPANSION_OR_REDIRECTION = /[|<>`]|\$\(/;
+
+const SAFE_GIT_READ_ONLY_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "rev-parse", "merge-base",
+  "describe", "shortlog", "reflog", "ls-files", "ls-tree",
+  "name-rev", "for-each-ref",
+]);
 
 interface DenyPattern { test: (cmd: string) => boolean; reason: string; }
 interface ReviewPattern { test: (cmd: string) => boolean; reason: string; }
@@ -194,6 +194,62 @@ function stripLeadingEnvAssignments(cmd: string): string {
   return remaining;
 }
 
+function stripLeadingGitOptions(gitArgs: string): string {
+  let remaining = gitArgs.trim();
+  const argValue = /(?:"[^"]*"|'[^']*'|\S+)/;
+  while (remaining) {
+    const dashCMatch = remaining.match(new RegExp(`^-C\\s+${argValue.source}\\s+(.+)$`));
+    if (dashCMatch) {
+      remaining = dashCMatch[1]?.trim() || "";
+      continue;
+    }
+    const configMatch = remaining.match(new RegExp(`^-c\\s+${argValue.source}\\s+(.+)$`));
+    if (configMatch) {
+      remaining = configMatch[1]?.trim() || "";
+      continue;
+    }
+    return remaining;
+  }
+  return remaining;
+}
+
+function isReadOnlyBashCommand(cmd: string): boolean {
+  if (SHELL_EXPANSION_OR_REDIRECTION.test(cmd)) return false;
+  if (SECRET_PATH_PATTERN.test(cmd)) return false;
+
+  const firstWord = getFirstWord(cmd);
+  if (SAFE_READ_ONLY_BASH_PREFIXES.has(firstWord)) return true;
+
+  if (firstWord === "find") {
+    return !/\s-(delete|exec|execdir|ok|okdir|fprint|fprintf)\b/.test(cmd);
+  }
+
+  if (firstWord === "sleep") {
+    const match = cmd.match(/^sleep\s+([0-9]+(?:\.[0-9]+)?)(s)?\s*$/);
+    return !!match && Number(match[1]) <= 10;
+  }
+
+  return false;
+}
+
+function isAllowedProjectCheckCommand(cmd: string): boolean {
+  if (SHELL_EXPANSION_OR_REDIRECTION.test(cmd)) return false;
+  if (SECRET_PATH_PATTERN.test(cmd)) return false;
+
+  return /^make\s+review\s*$/.test(cmd) || /^pnpm\s+test(?:\s|$)/.test(cmd);
+}
+
+function isAllowedGitCommand(effectiveGitCmd: string): boolean {
+  if (/^rebase\s+--(continue|abort|quit)\b/.test(effectiveGitCmd)) return true;
+  if (/^commit\b/.test(effectiveGitCmd)) return true;
+  if (/^branch\s*(-[avv-]+)?\s*$/.test(effectiveGitCmd)) return true;
+  if (/^remote\s+(-v|show\b|get-url\b)/.test(effectiveGitCmd)) return true;
+  if (/^tag(?:\s+(?:-l|--list)(?:\s+\S+)?)?\s*$/.test(effectiveGitCmd)) return true;
+
+  const sub = effectiveGitCmd.split(/\s+/)[0] || "";
+  return SAFE_GIT_READ_ONLY_SUBCOMMANDS.has(sub);
+}
+
 /**
  * Fast deterministic evaluation of tool calls.
  * Returns a result if the rules engine can decide, or null to fall through to LLM.
@@ -243,15 +299,13 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
       if (!trimmed) continue;
       const firstWord = getFirstWord(trimmed);
 
-      if (SAFE_BASH_PREFIXES.some((p) => firstWord === p)) continue;
+      if (isReadOnlyBashCommand(trimmed)) continue;
+      if (isAllowedProjectCheckCommand(trimmed)) continue;
 
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");
-        const dashCMatch = gitArgs.match(/^-C\s+\S+\s+(.+)/);
-        const effectiveGitCmd = dashCMatch?.[1] ?? gitArgs;
-        if (/^rebase\s+--(continue|abort|quit)\b/.test(effectiveGitCmd)) continue;
-        const sub = effectiveGitCmd.split(/\s+/)[0] || "";
-        if (SAFE_GIT_SUBCOMMANDS.has(sub) || SAFE_GIT_WRITE_SUBCOMMANDS.has(sub)) continue;
+        const effectiveGitCmd = stripLeadingGitOptions(gitArgs);
+        if (isAllowedGitCommand(effectiveGitCmd)) continue;
         return null; // unknown git subcommand → LLM
       }
 
@@ -384,9 +438,22 @@ export function buildHookOutput(
     };
   }
 
+  if (hookEventName === "PreToolUse") {
+    if (decision !== "deny") {
+      return {};
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    };
+  }
+
   return {
     hookSpecificOutput: {
-      hookEventName: "PreToolUse",
+      hookEventName,
       permissionDecision: decision,
       permissionDecisionReason: reason,
     },

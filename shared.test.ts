@@ -96,6 +96,18 @@ describe("Codex hook normalization", () => {
     });
   });
 
+  test("allows git rebase continue with git config flags", () => {
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "git -c core.editor=true rebase --continue" },
+    });
+
+    expect(evaluateDeterministic(stdin)).toEqual({
+      decision: "allow",
+      reason: "All command parts matched safe patterns",
+    });
+  });
+
   test("deterministic checks support cmd and still deny force pushes", () => {
     const stdin = JSON.stringify({
       tool_name: "exec_command",
@@ -120,6 +132,99 @@ describe("Codex hook normalization", () => {
     });
   });
 
+  test("does not blanket-allow git network or worktree mutation commands", () => {
+    const commands = [
+      "git fetch origin",
+      "git add .",
+      "git checkout other-branch",
+      "git switch other-branch",
+      "git worktree add /tmp/project HEAD",
+      "git stash push",
+      "git remote add origin git@example.com:repo.git",
+      "git tag v1.0.0",
+    ];
+
+    for (const command of commands) {
+      expect(evaluateDeterministic(JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+      })), command).toBeNull();
+    }
+  });
+
+  test("does not blanket-allow execution, mutation, network, or OS commands", () => {
+    const commands = [
+      "npm install",
+      "yarn test",
+      "node script.js",
+      "npx tsx script.ts",
+      "bun test",
+      "docker ps",
+      "open README.md",
+      "afplay done.wav",
+      "osascript -e 'display notification \"done\"'",
+      "curl https://example.com",
+      "mkdir output",
+      "cp a b",
+      "mv a b",
+      "pup 'title text{}'",
+    ];
+
+    for (const command of commands) {
+      expect(evaluateDeterministic(JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+      })), command).toBeNull();
+    }
+  });
+
+  test("only allows narrow read-only shell commands deterministically", () => {
+    const allowed = [
+      "pwd",
+      "ls -la",
+      "rg TODO src",
+      "grep -R TODO src",
+      "head -n 20 README.md",
+      "tail -n 20 README.md",
+      "wc -l README.md",
+      "find src -name '*.ts'",
+      "sleep 1",
+      "make review",
+      "pnpm test",
+      "pnpm test -- --runInBand",
+    ];
+
+    for (const command of allowed) {
+      expect(evaluateDeterministic(JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+      })), command).toEqual({
+        decision: "allow",
+        reason: "All command parts matched safe patterns",
+      });
+    }
+
+    const reviewed = [
+      "cat .env",
+      "rg token .env.local",
+      "find . -delete",
+      "echo hi > output.txt",
+      "cat README.md | sh",
+      "sleep 30",
+      "pnpm install",
+      "pnpm exec tsx script.ts",
+      "make deploy",
+    ];
+
+    for (const command of reviewed) {
+      const result = evaluateDeterministic(JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+      }));
+      expect(result?.decision, command).not.toBe("allow");
+    }
+  });
+
   test("extracts paths from Codex cmd input", () => {
     const paths = extractPathsFromStdin(JSON.stringify({
       tool_input: { cmd: "sed -n '1,20p' ./src/index.ts" },
@@ -137,6 +242,18 @@ describe("Codex hook normalization", () => {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
         decision: { behavior: "allow" },
+      },
+    });
+  });
+
+  test("PreToolUse only emits blocking output for deny decisions", () => {
+    expect(buildHookOutput("PreToolUse", "allow", "ok")).toEqual({});
+    expect(buildHookOutput("PreToolUse", "ask", "review")).toEqual({});
+    expect(buildHookOutput("PreToolUse", "deny", "blocked")).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "blocked",
       },
     });
   });
@@ -159,6 +276,13 @@ describe("evaluator provider selection", () => {
     expect(selectLlmBackend("claude")).toBe("codex-subscription");
   });
 
+  test("request-scoped provider override wins over daemon environment", () => {
+    process.env.MOTHER_LLM_BACKEND = "claude";
+    expect(selectLlmBackend("codex", "auto")).toBe("codex-subscription");
+    expect(selectLlmBackend("claude", "codex")).toBe("codex-subscription");
+    expect(selectLlmBackend("codex", "anthropic-api")).toBe("anthropic-api");
+  });
+
   test("supports API and local backends", () => {
     process.env.MOTHER_LLM_BACKEND = "anthropic-api";
     expect(selectLlmBackend("codex")).toBe("anthropic-api");
@@ -167,4 +291,5 @@ describe("evaluator provider selection", () => {
     process.env.MOTHER_LLM_BACKEND = "local";
     expect(selectLlmBackend("claude")).toBe("local");
   });
+
 });
