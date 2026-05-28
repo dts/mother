@@ -233,13 +233,17 @@ async function evaluateCustomCriteria(
   criteria: string,
 ): Promise<string | null> {
   try {
+    const abort = AbortController ? new AbortController() : null;
+    const timeout = abort ? setTimeout(() => abort.abort(), 3000) : null;
     const response = await fetch(`http://localhost/eval-completion`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ lastMessage: lastMessage.slice(0, 2000), criteria }),
+      signal: abort?.signal,
       // @ts-ignore
       unix: SOCKET_PATH,
     });
+    if (timeout) clearTimeout(timeout);
     if (!response.ok) return null;
     const result = (await response.json()) as { satisfied: boolean; reason?: string };
     if (!result.satisfied) {
@@ -255,6 +259,8 @@ async function evaluateCustomCriteria(
 
 async function evaluateStatusSummary(lastMessage: string): Promise<string | null> {
   try {
+    const abort = AbortController ? new AbortController() : null;
+    const timeout = abort ? setTimeout(() => abort.abort(), 3000) : null;
     const response = await fetch(`http://localhost/eval-completion`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -269,9 +275,11 @@ A good status summary helps someone scanning a dashboard of many running agents 
 
 Short factual answers to questions (e.g., "The file is at src/foo.ts") do NOT need a status summary — only substantive work sessions do.`,
       }),
+      signal: abort?.signal,
       // @ts-ignore
       unix: SOCKET_PATH,
     });
+    if (timeout) clearTimeout(timeout);
     if (!response.ok) return null;
     const result = (await response.json()) as { satisfied: boolean; reason?: string };
     if (!result.satisfied) {

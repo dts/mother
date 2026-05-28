@@ -73,14 +73,14 @@ function isServerRunning(): boolean {
 }
 
 function startServer(): void {
+  // Use a restart loop so the daemon auto-recovers if Bun crashes
+  const restartLoop = [
+    "bash", "-c",
+    `while true; do env MOTHER_SOCKET=${SOCKET_PATH} MOTHER_TMUX_SESSION=${TMUX_SESSION} MOTHER_PID_FILE=${PID_FILE} MOTHER_LLM_BACKEND=${SERVER_BACKEND} bun ${SERVER_SCRIPT}; echo "[mother] server exited, restarting in 1s..."; sleep 1; done`,
+  ];
   Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", TMUX_SESSION,
-    "env",
-    `MOTHER_SOCKET=${SOCKET_PATH}`,
-    `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
-    `MOTHER_PID_FILE=${PID_FILE}`,
-    `MOTHER_LLM_BACKEND=${SERVER_BACKEND}`,
-    "bun", SERVER_SCRIPT,
+    ...restartLoop,
   ]);
 }
 
