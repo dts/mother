@@ -70,7 +70,12 @@ function isServerRunning(): boolean {
   }
 }
 
+const FORWARDED_ENV_PREFIXES = ["MOTHER_", "GOOGLE_", "ANTHROPIC_", "OPENAI_", "AI_GATEWAY_"];
+
 function startServer(): void {
+  const forwarded = Object.entries(process.env)
+    .filter(([k, v]) => v !== undefined && FORWARDED_ENV_PREFIXES.some((p) => k.startsWith(p)))
+    .map(([k, v]) => `${k}=${v}`);
   Bun.spawnSync([
     "tmux", "new-session", "-d", "-s", TMUX_SESSION,
     "env",
@@ -78,6 +83,7 @@ function startServer(): void {
     `MOTHER_TMUX_SESSION=${TMUX_SESSION}`,
     `MOTHER_PID_FILE=${PID_FILE}`,
     `MOTHER_LLM_BACKEND=${PROVIDER_MODE}`,
+    ...forwarded,
     "bun", SERVER_SCRIPT,
   ]);
 }

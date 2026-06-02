@@ -1,4 +1,5 @@
 import { readFile } from "fs/promises";
+import { readFileSync } from "fs";
 
 // --- Types ---
 
@@ -88,6 +89,29 @@ const SAFE_MCP_PREFIXES = [
   "mcp__asana__", "mcp__notion__", "mcp__figma__", "mcp__slack__", "mcp__datadog-api-claude-plugin__",
 ];
 
+// Neon tools that don't mutate state — auto-allow.
+// Mutating tools (run_sql, run_sql_transaction, *_migration, create_*, delete_*,
+// reset_from_parent, provision_*, prepare_query_tuning, complete_query_tuning,
+// get_connection_string) intentionally fall through to LLM eval so the SQL /
+// action is checked against the user's preferences.
+const READ_ONLY_NEON_TOOLS = new Set([
+  "mcp__Neon__compare_database_schema",
+  "mcp__Neon__describe_branch",
+  "mcp__Neon__describe_project",
+  "mcp__Neon__describe_table_schema",
+  "mcp__Neon__explain_sql_statement",
+  "mcp__Neon__fetch",
+  "mcp__Neon__get_database_tables",
+  "mcp__Neon__get_doc_resource",
+  "mcp__Neon__list_branch_computes",
+  "mcp__Neon__list_docs_resources",
+  "mcp__Neon__list_organizations",
+  "mcp__Neon__list_projects",
+  "mcp__Neon__list_shared_projects",
+  "mcp__Neon__list_slow_queries",
+  "mcp__Neon__search",
+]);
+
 const SAFE_BASH_PREFIXES = [
   "ls", "pwd", "which", "wc", "head", "tail", "cat", "echo", "find", "grep", "rg",
   "make", "pnpm", "npm", "yarn", "node", "npx", "bun", "docker", "open", "afplay",
@@ -126,8 +150,6 @@ const HARD_DENY_PATTERNS: DenyPattern[] = [
     reason: "Interactive mode (-i) does not work in Claude Code." },
   { test: (cmd) => /git\s+branch\s+-D/.test(cmd),
     reason: "Force-deleting branches (-D) is dangerous. Use -d." },
-  { test: (cmd) => /\bxargs\b/.test(cmd),
-    reason: "Prefer subagents over xargs." },
   { test: (cmd) => /\bsudo\b/.test(cmd),
     reason: "sudo commands are not allowed." },
   { test: (cmd) => /rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?[/~]\s*$/.test(cmd),
@@ -166,6 +188,62 @@ export interface DeterministicResult {
   reason: string;
 }
 
+/**
+ * User-extensible deterministic allow rules. Loaded additively from (in order):
+ *   1. `~/.mother/rules.json`              (global, mother-specific config dir)
+ *   2. `~/.claude/mother-rules.json`       (global, alongside other claude config)
+ *   3. `<repo>/.claude/mother-rules.json`  (repo override)
+ *
+ * JSON shape:
+ *   {
+ *     "allowTools": ["mcp__Neon__list_my_thing"],
+ *     "allowToolPrefixes": ["mcp__custom__"],
+ *     "allowBashFirstWords": ["mycli"]
+ *   }
+ *
+ * Anything matched here short-circuits to allow — it never reaches the LLM.
+ * For deny/review behavior, use security-preferences.md (LLM-evaluated).
+ */
+export interface CustomRules {
+  allowTools: Set<string>;
+  allowToolPrefixes: string[];
+  allowBashFirstWords: Set<string>;
+}
+
+const EMPTY_RULES: CustomRules = {
+  allowTools: new Set(),
+  allowToolPrefixes: [],
+  allowBashFirstWords: new Set(),
+};
+
+function mergeRulesFile(rules: CustomRules, path: string): void {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return;
+  }
+  if (Array.isArray(parsed.allowTools))
+    for (const t of parsed.allowTools) if (typeof t === "string") rules.allowTools.add(t);
+  if (Array.isArray(parsed.allowToolPrefixes))
+    for (const p of parsed.allowToolPrefixes) if (typeof p === "string") rules.allowToolPrefixes.push(p);
+  if (Array.isArray(parsed.allowBashFirstWords))
+    for (const w of parsed.allowBashFirstWords) if (typeof w === "string") rules.allowBashFirstWords.add(w);
+}
+
+export function loadCustomRules(cwd: string): CustomRules {
+  const rules: CustomRules = {
+    allowTools: new Set(),
+    allowToolPrefixes: [],
+    allowBashFirstWords: new Set(),
+  };
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+  mergeRulesFile(rules, `${homeDir}/.mother/rules.json`);
+  mergeRulesFile(rules, `${homeDir}/.claude/mother-rules.json`);
+  mergeRulesFile(rules, `${cwd}/.claude/mother-rules.json`);
+  return rules;
+}
+
 function getFirstWord(cmd: string): string {
   const parts = cmd.split(/\s+/);
   for (const part of parts) { if (!part.includes("=")) return part; }
@@ -198,7 +276,10 @@ function stripLeadingEnvAssignments(cmd: string): string {
  * Fast deterministic evaluation of tool calls.
  * Returns a result if the rules engine can decide, or null to fall through to LLM.
  */
-export function evaluateDeterministic(stdinContent: string): DeterministicResult | null {
+export function evaluateDeterministic(
+  stdinContent: string,
+  rules: CustomRules = EMPTY_RULES,
+): DeterministicResult | null {
   let toolName: string;
   let toolInput: Record<string, unknown>;
   try {
@@ -209,6 +290,12 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
     return null;
   }
 
+  // User-defined allowlist (mother-rules.json)
+  if (rules.allowTools.has(toolName))
+    return { decision: "allow", reason: "Allowed by mother-rules.json" };
+  if (rules.allowToolPrefixes.some((p) => toolName.startsWith(p)))
+    return { decision: "allow", reason: "Allowed by mother-rules.json (prefix)" };
+
   // Passthrough tools — always allow
   if (DETERMINISTIC_PASSTHROUGH.has(toolName))
     return { decision: "allow", reason: "Passthrough tool" };
@@ -216,6 +303,11 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
   // Safe MCP tools
   if (SAFE_MCP_PREFIXES.some((p) => toolName.startsWith(p)))
     return { decision: "allow", reason: "Safe MCP tool" };
+
+  // Read-only Neon tools — auto-allow. Mutating Neon tools fall through to
+  // LLM eval (which sees the SQL via stdin and checks it against preferences).
+  if (READ_ONLY_NEON_TOOLS.has(toolName))
+    return { decision: "allow", reason: "Read-only Neon tool" };
 
   // File write/edit — always allow (mode logic applied later)
   if (toolName === "Write" || toolName === "Edit" || toolName === "apply_patch")
@@ -244,6 +336,7 @@ export function evaluateDeterministic(stdinContent: string): DeterministicResult
       const firstWord = getFirstWord(trimmed);
 
       if (SAFE_BASH_PREFIXES.some((p) => firstWord === p)) continue;
+      if (rules.allowBashFirstWords.has(firstWord)) continue;
 
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");

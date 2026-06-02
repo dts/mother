@@ -19,6 +19,7 @@ import {
   buildDenyWithSuggestions,
   extractPathsFromStdin,
   evaluateDeterministic,
+  loadCustomRules,
 } from "./shared";
 import { notifyMuster } from "./muster";
 
@@ -41,7 +42,7 @@ async function main() {
   }
 
   // Stage 0: Deterministic rules engine (no LLM needed)
-  const deterministic = evaluateDeterministic(stdinContent);
+  const deterministic = evaluateDeterministic(stdinContent, loadCustomRules(cwd));
   if (deterministic) {
     // Apply mode logic on top of deterministic decision
     const modeDecision = deterministic.decision === "ask" ? "review" as const

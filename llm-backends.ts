@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { gateway } from "@ai-sdk/gateway";
+import { createVertex } from "@ai-sdk/google-vertex";
 import { generateText } from "ai";
 import { readFile, unlink } from "fs/promises";
 import type { HookClient } from "./shared";
@@ -11,6 +12,7 @@ export type LlmBackendName =
   | "anthropic-api"
   | "openai-api"
   | "ai-gateway"
+  | "google-vertex"
   | "local";
 
 export interface LlmBackend {
@@ -31,6 +33,7 @@ export function selectLlmBackend(client: HookClient): LlmBackendName {
   if (configured === "anthropic" || configured === "anthropic-api") return "anthropic-api";
   if (configured === "openai" || configured === "openai-api") return "openai-api";
   if (configured === "gateway" || configured === "ai-gateway" || configured === "vercel") return "ai-gateway";
+  if (configured === "vertex" || configured === "google-vertex" || configured === "vertex-ai" || configured === "gemini" || configured === "google") return "google-vertex";
   if (configured === "local" || configured === "ollama" || configured === "openai-compatible") return "local";
   throw new Error(`Unknown MOTHER_LLM_BACKEND/MOTHER_EVAL_PROVIDER: ${configured}`);
 }
@@ -48,6 +51,8 @@ export function createLlmBackend(context: LlmBackendContext): LlmBackend {
       return { name: backend, generateText: queryOpenAiCompatibleApi };
     case "ai-gateway":
       return { name: backend, generateText: queryAiGateway };
+    case "google-vertex":
+      return { name: backend, generateText: queryVertexAi };
     case "local":
       return { name: backend, generateText: queryLocalOpenAiCompatible };
   }
@@ -143,6 +148,20 @@ async function queryAnthropicApi(prompt: string): Promise<string> {
 async function queryAiGateway(prompt: string): Promise<string> {
   const { text } = await generateText({
     model: gateway(process.env.MOTHER_AI_GATEWAY_MODEL || process.env.MOTHER_LLM_MODEL || "openai/gpt-5.5"),
+    prompt,
+  });
+  return text;
+}
+
+async function queryVertexAi(prompt: string): Promise<string> {
+  const project = process.env.MOTHER_VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+  if (!project) throw new Error("Missing GCP project: set MOTHER_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT");
+  const vertex = createVertex({
+    project,
+    location: process.env.MOTHER_VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
+  });
+  const { text } = await generateText({
+    model: vertex(process.env.MOTHER_VERTEX_MODEL || process.env.MOTHER_LLM_MODEL || "gemini-2.5-flash"),
     prompt,
   });
   return text;

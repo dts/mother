@@ -11,7 +11,7 @@
 
 import { readFile, unlink } from "fs/promises";
 import { runAnalysisPipeline } from "./analysis-pipeline";
-import { createLlmBackend, queryClaudeSubscription, selectLlmBackend } from "./llm-backends";
+import { createLlmBackend, selectLlmBackend } from "./llm-backends";
 import { DEFAULT_INSTANCE_NAME, DEFAULT_PID_FILE, DEFAULT_SOCKET_PATH, SERVER_DIR } from "./server-identity";
 import {
   type EvalRequest,
@@ -24,6 +24,7 @@ import {
   PASSTHROUGH_TOOLS,
   extractPathsFromStdin,
   evaluateDeterministic,
+  loadCustomRules,
 } from "./shared";
 
 const SOCKET_PATH = process.env.MOTHER_SOCKET || DEFAULT_SOCKET_PATH;
@@ -83,7 +84,7 @@ async function handleRequest(req: EvalRequest): Promise<EvalResponse> {
   }
 
   // Stage 0: Deterministic rules engine (no LLM needed)
-  const deterministic = evaluateDeterministic(stdin);
+  const deterministic = evaluateDeterministic(stdin, loadCustomRules(cwd));
   if (deterministic) {
     const modeDecision = deterministic.decision === "ask" ? "review" as const
       : deterministic.decision === "deny" ? "deny" as const
@@ -155,7 +156,8 @@ async function evaluateCompletion(
   lastMessage: string,
   criteria: string,
 ): Promise<{ satisfied: boolean; reason?: string }> {
-  const text = await queryClaudeSubscription(`You are evaluating whether a task has been adequately completed.
+  const backend = createLlmBackend({ client: "claude", cwd: process.cwd() });
+  const text = await backend.generateText(`You are evaluating whether a task has been adequately completed.
 
 Here is the assistant's final message:
 <message>

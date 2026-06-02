@@ -184,6 +184,30 @@ Edit `~/.claude/security-preferences.md` for global rules, or create `.claude/se
 - File operations outside project
 - Creating executables
 
+## Local Rules (`mother-rules.json`)
+
+The deterministic engine runs before any LLM call. To extend its allowlist (e.g., trust additional MCP tools or local CLIs without LLM evaluation), drop a `mother-rules.json` file in any of these locations — they're merged additively:
+
+1. `~/.mother/rules.json` — global, mother-specific config dir
+2. `~/.claude/mother-rules.json` — global, alongside other Claude config
+3. `<repo>/.claude/mother-rules.json` — repo-level override
+
+Example:
+
+```json
+{
+  "allowTools": ["mcp__Neon__list_my_thing"],
+  "allowToolPrefixes": ["mcp__custom__", "mcp__internal__"],
+  "allowBashFirstWords": ["mycli", "deploy-tool"]
+}
+```
+
+- `allowTools` — exact tool name match → auto-allow
+- `allowToolPrefixes` — tool name starts-with → auto-allow
+- `allowBashFirstWords` — bash command's first word → auto-allow that segment (still subject to hard-deny patterns like `--no-verify`, `sudo`, etc.)
+
+Anything matched here short-circuits to allow and never reaches the LLM. For deny/review behavior, use `security-preferences.md` (LLM-evaluated). Built-in Neon read-only tools (`list_*`, `describe_*`, `compare_database_schema`, `explain_sql_statement`, `search`, etc.) are already auto-allowed; mutating Neon tools like `run_sql` fall through to the LLM so the SQL itself is evaluated against your preferences.
+
 ## Output Format
 
 Mother outputs JSON that Claude Code understands:
