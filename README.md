@@ -71,7 +71,7 @@ Add to `~/.claude/settings.json` or `.claude/settings.json`:
   "hooks": {
     "PermissionRequest": [
       {
-        "matcher": "Bash|Write|Edit",
+        "matcher": "Bash|Write|Edit|Read|Search|Grep|Glob|Monitor|mcp__.*",
         "hooks": [
           {
             "type": "command",
