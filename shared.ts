@@ -719,14 +719,6 @@ export function buildDenyWithSuggestions(toolName: string, stdin: string, baseRe
     );
   }
 
-  // Complex compound commands
-  if (lower.includes("&&") && (lower.includes("|") || lower.includes("xargs"))) {
-    suggestions.push(
-      "Break this into separate, simpler commands instead of chaining with && and pipes.",
-      "Use the Agent/Task tool to run independent steps as subagents.",
-    );
-  }
-
   // Operations outside project
   if (lower.includes("/etc/") || lower.includes("/usr/") || lower.includes("bashrc") || lower.includes("zshrc")) {
     suggestions.push(
@@ -765,15 +757,6 @@ export function earlyBashCheck(
   } catch {
     const commandMatch = stdinContent.match(/"(?:command|cmd)"\s*:\s*"([^"]+)"/);
     command = commandMatch?.[1] || "";
-  }
-
-  // Deny xargs in acceptEdits mode
-  if (permissionMode === "acceptEdits" && command.includes("xargs")) {
-    return buildHookOutput(
-      hookEventName,
-      "deny",
-      "xargs pipelines are not allowed. Use the Task tool with subagents to parallelize work instead.",
-    );
   }
 
   // Allow read-only gh/glab commands deterministically (skip LLM)
