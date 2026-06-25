@@ -87,6 +87,7 @@ const DETERMINISTIC_PASSTHROUGH = new Set([
 
 const SAFE_MCP_PREFIXES = [
   "mcp__asana__", "mcp__notion__", "mcp__figma__", "mcp__slack__", "mcp__datadog-api-claude-plugin__",
+  "mcp__sentry__",
 ];
 
 // Neon tools that don't mutate state — auto-allow.
@@ -116,7 +117,22 @@ const SAFE_BASH_PREFIXES = [
   "ls", "pwd", "which", "wc", "head", "tail", "cat", "echo", "find", "grep", "rg",
   "make", "pnpm", "npm", "yarn", "node", "npx", "bun", "docker", "open", "afplay",
   "osascript", "curl", "mkdir", "cp", "mv", "pup", "sleep",
+  // Shell navigation / setup
+  "cd", "export", "unset", "source", ".",
+  // Android dev tools (explicitly allowed in security preferences)
+  "adb",
+  // iOS dev tools
+  "xcrun", "xcodebuild", "simctl",
 ];
+
+// Shell structural keywords — safe to skip in compound command analysis.
+// Includes loop/conditional headers (for/while/if/case) since their bodies
+// are analyzed separately when we split on newlines/semicolons.
+const SHELL_KEYWORDS = new Set([
+  "for", "while", "until", "if", "case", "function",
+  "do", "done", "then", "else", "elif", "fi", "esac", "in", ";;",
+  "{", "}", "[[", "]]", "[", "]",
+]);
 
 const SAFE_GIT_SUBCOMMANDS = new Set([
   "status", "diff", "log", "show", "branch", "fetch", "rev-parse", "merge-base",
@@ -328,15 +344,55 @@ export function evaluateDeterministic(
       if (p.test(cmd)) return { decision: "ask", reason: p.reason };
     }
 
-    // Check each part of compound commands
-    const parts = cmd.split(/\s*(?:&&|\|\||;)\s*/);
+    // Check each part of compound commands (split on ;, &&, ||, and newlines)
+    const parts = cmd.split(/\s*(?:&&|\|\||;|\n)\s*/);
+    // Track variable assignments within this command block for $VAR resolution
+    const assignedVars: Record<string, string> = {};
     for (const part of parts) {
-      const trimmed = stripLeadingEnvAssignments(part);
+      const raw = part.trim();
+      if (!raw) continue;
+
+      // Shell structural keywords — not real commands
+      const rawFirstWord = raw.split(/\s+/)[0]?.replace(/;+$/, "") ?? "";
+      if (SHELL_KEYWORDS.has(raw) || SHELL_KEYWORDS.has(raw.replace(/;+$/, "")) || SHELL_KEYWORDS.has(rawFirstWord)) continue;
+
+      // Standalone variable assignments (VAR=value with no trailing command).
+      // Record the value so we can resolve $VAR expansions later in the same block.
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw)) {
+        const afterEnv = stripLeadingEnvAssignments(raw + " __probe__").trim();
+        if (afterEnv === "__probe__") {
+          // Pure assignment line — record and skip
+          const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(\S*))/.exec(raw);
+          if (m) assignedVars[m[1]] = m[2] ?? m[3] ?? m[4] ?? "";
+          continue;
+        }
+      }
+
+      // Resolve $VAR when it's the command word (e.g. $ADB shell ...)
+      let resolved = raw;
+      const varExpansion = /^\$([A-Za-z_][A-Za-z0-9_]*)(\s|$)/.exec(raw);
+      if (varExpansion && assignedVars[varExpansion[1]] !== undefined) {
+        resolved = assignedVars[varExpansion[1]] + raw.slice(varExpansion[0].length - (varExpansion[2] ? 0 : 0));
+        resolved = (assignedVars[varExpansion[1]] + " " + raw.slice(varExpansion[0].length)).trim();
+      }
+
+      const trimmed = stripLeadingEnvAssignments(resolved);
       if (!trimmed) continue;
       const firstWord = getFirstWord(trimmed);
 
       if (SAFE_BASH_PREFIXES.some((p) => firstWord === p)) continue;
       if (rules.allowBashFirstWords.has(firstWord)) continue;
+
+      // Wrapper commands — strip and re-check the inner command
+      if (firstWord === "timeout" || firstWord === "nice" || firstWord === "nohup") {
+        // timeout <secs> <cmd...> or nice/nohup <cmd...> — skip the wrapper word(s)
+        const inner = trimmed.replace(/^(timeout\s+\d+\s*|nice\s+(-n\s*\d+\s*)?|nohup\s+)/, "").trim();
+        if (inner) {
+          // Re-push as a new part to evaluate
+          parts.push(inner);
+        }
+        continue;
+      }
 
       if (firstWord === "git") {
         const gitArgs = trimmed.replace(/^git\s+/, "");
@@ -349,9 +405,12 @@ export function evaluateDeterministic(
       }
 
       if (firstWord === "rm") {
-        const safe = /rm\s+(-\S+\s+)?(\S*\/)?(node_modules|\.next|dist|build|\.turbo|\.cache|coverage|tmp|\.tsbuildinfo)\s*$/;
-        if (safe.test(trimmed)) continue;
-        return null; // unknown rm target → LLM
+        const safeKnownDirs = /rm\s+(-\S+\s+)?(\S*\/)?(node_modules|\.next|dist|build|\.turbo|\.cache|coverage|tmp|\.tsbuildinfo)\s*$/;
+        if (safeKnownDirs.test(trimmed)) continue;
+        // rm of project-local files (no absolute paths, no ~, no parent traversal)
+        const afterCmd = trimmed.replace(/^rm\s+(-[a-zA-Z]+\s+)*/, "");
+        if (!/[/~]/.test(afterCmd) && !afterCmd.includes("..")) continue;
+        return null; // absolute/home/traversal rm target → LLM
       }
 
       // Scripts in ~/.claude/scripts/
