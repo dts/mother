@@ -602,9 +602,21 @@ export function parseHookContext(stdinContent: string): {
       permissionMode = "plan";
     } else if (rawMode === "acceptEdits" || rawMode === "acceptAllEdits") {
       permissionMode = "acceptEdits";
+    } else if (rawMode === "auto" || rawMode === "autoAccept") {
+      // Claude Code's newer "auto" mode is at least as permissive as accept-edits.
+      // Without this branch it fell through to "default" — the *most* conservative
+      // mode — so turning Auto on made mother ask about more, not less.
+      // TODO: auto likely deserves its own policy rather than aliasing acceptEdits.
+      console.error(`[mother] permission mode "${rawMode}" treated as acceptEdits`);
+      permissionMode = "acceptEdits";
     } else if (rawMode === "codex") {
       permissionMode = "codex";
     } else {
+      // Log rather than silently coerce, so the next new mode is visible in the
+      // hook stderr instead of quietly becoming the strictest setting.
+      if (rawMode !== "default") {
+        console.error(`[mother] unrecognized permission mode "${rawMode}" — treating as default`);
+      }
       permissionMode = "default";
     }
     cwd = parsed.cwd || cwd;
@@ -765,11 +777,22 @@ export function applyModeLogic(
 export function buildDenyWithSuggestions(toolName: string, stdin: string, baseReason: string): string {
   const suggestions: string[] = [];
   const lower = stdin.toLowerCase();
+  const reason = baseReason.toLowerCase();
+
+  // Suggestions are keyed off the rule that produced the denial, with the
+  // command only used to narrow within a topic. Keying off the command alone
+  // stapled unrelated advice onto denials — a `git clean` block on a command
+  // that merely mentioned the word "secret" came back telling the caller how to
+  // handle secrets.
+  const isSecretDenial = /secret|credential|\.env|\.pem|id_rsa|id_ed25519|_key/.test(reason);
+  const isSystemPathDenial = /system director|\/etc\/|\/usr\/|bashrc|zshrc/.test(reason);
+  const isDeletionDenial = /delet|destructive|irreversib|discard|broad rm/.test(reason);
 
   // Secret exposure
-  if (lower.includes(".env") || lower.includes("credential") || lower.includes("secret") ||
+  if (isSecretDenial &&
+      (lower.includes(".env") || lower.includes("credential") || lower.includes("secret") ||
       lower.includes("id_rsa") || lower.includes("id_ed25519") || lower.includes(".pem") ||
-      lower.includes(".key") || lower.includes("_key") || lower.includes("_secret")) {
+      lower.includes(".key") || lower.includes("_key") || lower.includes("_secret"))) {
     suggestions.push(
       "Use env variable expansion ($VAR) instead of reading secret files directly.",
       "If you need to verify a secret exists, use: test -f <path> or wc -l < <path>.",
@@ -779,7 +802,8 @@ export function buildDenyWithSuggestions(toolName: string, stdin: string, baseRe
   }
 
   // Operations outside project
-  if (lower.includes("/etc/") || lower.includes("/usr/") || lower.includes("bashrc") || lower.includes("zshrc")) {
+  if (isSystemPathDenial &&
+      (lower.includes("/etc/") || lower.includes("/usr/") || lower.includes("bashrc") || lower.includes("zshrc"))) {
     suggestions.push(
       "Use project-local config files instead of modifying system files.",
       "Write to /tmp/ or the project directory for temporary files.",
@@ -787,11 +811,14 @@ export function buildDenyWithSuggestions(toolName: string, stdin: string, baseRe
   }
 
   // Mass delete
-  if ((lower.includes("rm ") || lower.includes("rm\t")) && (lower.includes(" -rf") || lower.includes(" -r "))) {
-    suggestions.push(
-      "Scope deletions to the project directory.",
-      "Use git clean -fd for cleaning untracked files within the repo.",
-    );
+  if (isDeletionDenial) {
+    suggestions.push("Scope deletions to the project directory.");
+    // Don't recommend the very command that was just blocked.
+    if (!/git\s+clean/.test(reason)) {
+      suggestions.push("Use git clean -fd for cleaning untracked files within the repo.");
+    } else {
+      suggestions.push("Remove specific paths instead, or use git clean -nd first to preview.");
+    }
   }
 
   if (suggestions.length > 0) {

@@ -3,6 +3,7 @@ import { selectLlmBackend } from "./llm-backends";
 import {
   applyModeLogic,
   buildHookOutput,
+  buildDenyWithSuggestions,
   evaluateDeterministic,
   extractPathsFromStdin,
   parseHookContext,
@@ -142,7 +143,40 @@ describe("Codex hook normalization", () => {
   });
 });
 
+describe("auto permission mode", () => {
+  const ctxForMode = (mode: string) => parseHookContext(JSON.stringify({
+    hook_event_name: "PermissionRequest",
+    permission_mode: mode,
+    tool_name: "Bash",
+    tool_input: { command: "ls -la" },
+    cwd: "/tmp/project",
+  }));
+
+  test("treats Claude's auto mode as acceptEdits, not default", () => {
+    expect(ctxForMode("auto").permissionMode).toBe("acceptEdits");
+    expect(ctxForMode("autoAccept").permissionMode).toBe("acceptEdits");
+  });
+
+  test("auto mode auto-approves review decisions like acceptEdits", () => {
+    // The regression: under "default" a review becomes an "ask", so the user
+    // gets prompted for everything the LLM is merely unsure about.
+    expect(applyModeLogic("review", "default", "Bash").decision).toBe("ask");
+    expect(applyModeLogic("review", ctxForMode("auto").permissionMode, "Bash").decision).toBe("allow");
+  });
+
+  test("unrecognized modes stay conservative", () => {
+    expect(ctxForMode("someFutureMode").permissionMode).toBe("default");
+  });
+});
+
 describe("evaluator provider selection", () => {
+  test("selects the Google ADC backend", () => {
+    process.env.MOTHER_LLM_BACKEND = "google-adc";
+    expect(selectLlmBackend("claude")).toBe("google-adc");
+    process.env.MOTHER_LLM_BACKEND = "adc";
+    expect(selectLlmBackend("claude")).toBe("google-adc");
+  });
+
   test("auto mode uses Codex for Codex clients", () => {
     delete process.env.MOTHER_LLM_BACKEND;
     delete process.env.MOTHER_EVAL_PROVIDER;
@@ -166,5 +200,40 @@ describe("evaluator provider selection", () => {
     expect(selectLlmBackend("claude")).toBe("openai-api");
     process.env.MOTHER_LLM_BACKEND = "local";
     expect(selectLlmBackend("claude")).toBe("local");
+  });
+});
+
+describe("deny suggestions", () => {
+  const stdinFor = (command: string) => JSON.stringify({ tool_name: "Bash", tool_input: { command } });
+
+  test("suggestions follow the denial reason, not stray words in the command", () => {
+    // Observed live: grepping for the word "secret" while denied for git clean
+    // came back with secret-handling advice attached to a deletion denial.
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("grep -rn 'secret' . ; git clean -fd"),
+      "git clean -f removes untracked files irreversibly.",
+    );
+    expect(out).toContain("git clean -f removes untracked files irreversibly.");
+    expect(out).not.toContain("env variable expansion");
+    expect(out).not.toContain("--token");
+  });
+
+  test("a secrets denial still gets secrets advice", () => {
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("cat .env"),
+      "Writing to secrets/credential files is not allowed.",
+    );
+    expect(out).toContain("env variable expansion");
+  });
+
+  test("a deletion denial does not recommend the thing it just blocked", () => {
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("git clean -fdx"),
+      "git clean -f removes untracked files irreversibly.",
+    );
+    expect(out).not.toContain("Use git clean -fd");
   });
 });

@@ -5,7 +5,7 @@
  * installed.
  *
  * Fails safe in every direction:
- *   - $MUSTER_CHECKOUT not set → no-op (we're outside a Muster session)
+ *   - neither $MUSTER_CHECKOUT nor $MUSTER_TERMINAL set → no-op (outside Muster)
  *   - File IO failure → swallowed (a hook crash is worse than a stale dot)
  *   - Never throws
  */
@@ -53,7 +53,11 @@ export async function notifyMuster(
   state: MusterState,
   message?: string,
 ): Promise<void> {
-  const checkout = process.env.MUSTER_CHECKOUT;
+  // Muster launches repo sessions with MUSTER_CHECKOUT but terminal sessions
+  // with only MUSTER_TERMINAL. Both are keyed the same way on Muster's side
+  // (sha256 of the path, stored under `checkout=`), so falling back keeps the
+  // dot working in terminals instead of silently doing nothing there.
+  const checkout = process.env.MUSTER_CHECKOUT || process.env.MUSTER_TERMINAL;
   if (!checkout) return;
 
   try {
