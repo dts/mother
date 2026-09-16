@@ -602,9 +602,21 @@ export function parseHookContext(stdinContent: string): {
       permissionMode = "plan";
     } else if (rawMode === "acceptEdits" || rawMode === "acceptAllEdits") {
       permissionMode = "acceptEdits";
+    } else if (rawMode === "auto" || rawMode === "autoAccept") {
+      // Claude Code's newer "auto" mode is at least as permissive as accept-edits.
+      // Without this branch it fell through to "default" — the *most* conservative
+      // mode — so turning Auto on made mother ask about more, not less.
+      // TODO: auto likely deserves its own policy rather than aliasing acceptEdits.
+      console.error(`[mother] permission mode "${rawMode}" treated as acceptEdits`);
+      permissionMode = "acceptEdits";
     } else if (rawMode === "codex") {
       permissionMode = "codex";
     } else {
+      // Log rather than silently coerce, so the next new mode is visible in the
+      // hook stderr instead of quietly becoming the strictest setting.
+      if (rawMode !== "default") {
+        console.error(`[mother] unrecognized permission mode "${rawMode}" — treating as default`);
+      }
       permissionMode = "default";
     }
     cwd = parsed.cwd || cwd;

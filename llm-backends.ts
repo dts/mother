@@ -13,6 +13,7 @@ export type LlmBackendName =
   | "openai-api"
   | "ai-gateway"
   | "google-vertex"
+  | "google-adc"
   | "local";
 
 export interface LlmBackend {
@@ -34,6 +35,7 @@ export function selectLlmBackend(client: HookClient): LlmBackendName {
   if (configured === "openai" || configured === "openai-api") return "openai-api";
   if (configured === "gateway" || configured === "ai-gateway" || configured === "vercel") return "ai-gateway";
   if (configured === "vertex" || configured === "google-vertex" || configured === "vertex-ai" || configured === "gemini" || configured === "google") return "google-vertex";
+  if (configured === "adc" || configured === "google-adc" || configured === "vertex-adc" || configured === "gcloud") return "google-adc";
   if (configured === "local" || configured === "ollama" || configured === "openai-compatible") return "local";
   throw new Error(`Unknown MOTHER_LLM_BACKEND/MOTHER_EVAL_PROVIDER: ${configured}`);
 }
@@ -53,6 +55,8 @@ export function createLlmBackend(context: LlmBackendContext): LlmBackend {
       return { name: backend, generateText: queryAiGateway };
     case "google-vertex":
       return { name: backend, generateText: queryVertexAi };
+    case "google-adc":
+      return { name: backend, generateText: queryVertexAdc };
     case "local":
       return { name: backend, generateText: queryLocalOpenAiCompatible };
   }
@@ -165,6 +169,78 @@ async function queryVertexAi(prompt: string): Promise<string> {
     prompt,
   });
   return text;
+}
+
+/**
+ * Vertex AI authenticated through Application Default Credentials.
+ *
+ * Distinct from the `google-vertex` backend: that one leans on whatever
+ * credentials the SDK happens to discover, which silently picks up a service
+ * account or a stale key. This one pins auth to ADC (`gcloud auth
+ * application-default login`) with an explicit scope, and resolves the project
+ * from ADC/gcloud config when it isn't set in the environment — so a machine
+ * that can already run `gcloud` needs no extra configuration.
+ */
+let adcProjectCache: string | null | undefined;
+
+async function detectAdcProject(): Promise<string | null> {
+  if (adcProjectCache !== undefined) return adcProjectCache;
+
+  // The ADC file records the quota project for user credentials.
+  try {
+    const path = process.env.GOOGLE_APPLICATION_CREDENTIALS
+      || `${process.env.HOME}/.config/gcloud/application_default_credentials.json`;
+    const json = JSON.parse(await readFile(path, "utf-8"));
+    if (json.quota_project_id) return (adcProjectCache = json.quota_project_id);
+  } catch {
+    // Fall through to gcloud.
+  }
+
+  try {
+    const proc = Bun.spawnSync(["gcloud", "config", "get-value", "project"]);
+    const value = new TextDecoder().decode(proc.stdout).trim();
+    if (proc.exitCode === 0 && value && value !== "(unset)") return (adcProjectCache = value);
+  } catch {
+    // No gcloud on PATH.
+  }
+
+  return (adcProjectCache = null);
+}
+
+async function queryVertexAdc(prompt: string): Promise<string> {
+  const project = process.env.MOTHER_VERTEX_PROJECT
+    || process.env.GOOGLE_CLOUD_PROJECT
+    || process.env.GCLOUD_PROJECT
+    || await detectAdcProject();
+  if (!project) {
+    throw new Error(
+      "google-adc: no GCP project. Set MOTHER_VERTEX_PROJECT, or run `gcloud config set project <id>`.",
+    );
+  }
+
+  const vertex = createVertex({
+    project,
+    location: process.env.MOTHER_VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
+    googleAuthOptions: {
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    },
+  });
+
+  try {
+    const { text } = await generateText({
+      model: vertex(process.env.MOTHER_VERTEX_MODEL || process.env.MOTHER_LLM_MODEL || "gemini-2.5-flash"),
+      prompt,
+    });
+    return text;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/could not load the default credentials|invalid_grant|unable to detect a project|reauth/i.test(message)) {
+      throw new Error(
+        `google-adc: credentials are not usable (${message}). Run \`gcloud auth application-default login\`.`,
+      );
+    }
+    throw error;
+  }
 }
 
 async function queryOpenAiCompatibleApi(prompt: string): Promise<string> {

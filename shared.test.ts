@@ -142,7 +142,40 @@ describe("Codex hook normalization", () => {
   });
 });
 
+describe("auto permission mode", () => {
+  const ctxForMode = (mode: string) => parseHookContext(JSON.stringify({
+    hook_event_name: "PermissionRequest",
+    permission_mode: mode,
+    tool_name: "Bash",
+    tool_input: { command: "ls -la" },
+    cwd: "/tmp/project",
+  }));
+
+  test("treats Claude's auto mode as acceptEdits, not default", () => {
+    expect(ctxForMode("auto").permissionMode).toBe("acceptEdits");
+    expect(ctxForMode("autoAccept").permissionMode).toBe("acceptEdits");
+  });
+
+  test("auto mode auto-approves review decisions like acceptEdits", () => {
+    // The regression: under "default" a review becomes an "ask", so the user
+    // gets prompted for everything the LLM is merely unsure about.
+    expect(applyModeLogic("review", "default", "Bash").decision).toBe("ask");
+    expect(applyModeLogic("review", ctxForMode("auto").permissionMode, "Bash").decision).toBe("allow");
+  });
+
+  test("unrecognized modes stay conservative", () => {
+    expect(ctxForMode("someFutureMode").permissionMode).toBe("default");
+  });
+});
+
 describe("evaluator provider selection", () => {
+  test("selects the Google ADC backend", () => {
+    process.env.MOTHER_LLM_BACKEND = "google-adc";
+    expect(selectLlmBackend("claude")).toBe("google-adc");
+    process.env.MOTHER_LLM_BACKEND = "adc";
+    expect(selectLlmBackend("claude")).toBe("google-adc");
+  });
+
   test("auto mode uses Codex for Codex clients", () => {
     delete process.env.MOTHER_LLM_BACKEND;
     delete process.env.MOTHER_EVAL_PROVIDER;
