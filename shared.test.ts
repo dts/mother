@@ -3,6 +3,7 @@ import { selectLlmBackend } from "./llm-backends";
 import {
   applyModeLogic,
   buildHookOutput,
+  buildDenyWithSuggestions,
   evaluateDeterministic,
   extractPathsFromStdin,
   parseHookContext,
@@ -199,5 +200,40 @@ describe("evaluator provider selection", () => {
     expect(selectLlmBackend("claude")).toBe("openai-api");
     process.env.MOTHER_LLM_BACKEND = "local";
     expect(selectLlmBackend("claude")).toBe("local");
+  });
+});
+
+describe("deny suggestions", () => {
+  const stdinFor = (command: string) => JSON.stringify({ tool_name: "Bash", tool_input: { command } });
+
+  test("suggestions follow the denial reason, not stray words in the command", () => {
+    // Observed live: grepping for the word "secret" while denied for git clean
+    // came back with secret-handling advice attached to a deletion denial.
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("grep -rn 'secret' . ; git clean -fd"),
+      "git clean -f removes untracked files irreversibly.",
+    );
+    expect(out).toContain("git clean -f removes untracked files irreversibly.");
+    expect(out).not.toContain("env variable expansion");
+    expect(out).not.toContain("--token");
+  });
+
+  test("a secrets denial still gets secrets advice", () => {
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("cat .env"),
+      "Writing to secrets/credential files is not allowed.",
+    );
+    expect(out).toContain("env variable expansion");
+  });
+
+  test("a deletion denial does not recommend the thing it just blocked", () => {
+    const out = buildDenyWithSuggestions(
+      "Bash",
+      stdinFor("git clean -fdx"),
+      "git clean -f removes untracked files irreversibly.",
+    );
+    expect(out).not.toContain("Use git clean -fd");
   });
 });
