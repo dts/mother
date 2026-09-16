@@ -27,7 +27,17 @@ export async function runAnalysisPipeline(
   backend: LlmBackend,
   input: AnalysisPipelineInput,
 ): Promise<AnalysisPipelineResult> {
-  const triage = await runTriagePass(backend, input);
+  // Triage gates the other two passes, but shares no data with them, so it runs
+  // concurrently with the explanation instead of in front of it. Triage trips on
+  // ~0.2% of requests, making the occasional discarded explanation a good trade
+  // for dropping a full round trip off every other request.
+  const triagePromise = runTriagePass(backend, input);
+  const explanationPromise = runExplanationPass(backend, input);
+  // Mark the explanation as handled so an early triage exit can't leave an
+  // unhandled rejection behind. Awaiting it below still throws normally.
+  explanationPromise.catch(() => {});
+
+  const triage = await triagePromise;
   if (triage.promptInjectionScore >= 60 || triage.regexFlags.length > 0) {
     return {
       triage,
@@ -42,7 +52,7 @@ export async function runAnalysisPipeline(
     };
   }
 
-  const explanation = await runExplanationPass(backend, input);
+  const explanation = await explanationPromise;
   const { preferenceCheck, denyMessage } = await runPreferencePass(backend, input, explanation);
   return { triage, explanation, preferenceCheck, denyMessage };
 }
