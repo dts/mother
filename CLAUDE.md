@@ -109,3 +109,10 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Literate code
+
+New or rewritten code reads as its steps: the top-level function is a list of steps in
+order, each a call named truly for what it does. The standard is
+[docs/standards/literate-code.md](docs/standards/literate-code.md), the same in every
+repository; the `literate-code` skill walks through it.
